@@ -48,6 +48,7 @@
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
+    "@types/bwip-js": "^3.2.3",
     "@types/node": "^25.5.0",
     "drizzle-kit": "^0.31.10",
     "eslint": "^10.1.0",
