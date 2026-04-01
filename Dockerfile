@@ -6,7 +6,7 @@ RUN npm ci --ignore-scripts
 COPY tsconfig.json tsup.config.ts* ./
 COPY src/ ./src/
 COPY drizzle.config.ts ./
-RUN npx tsup src/server.ts --format esm --dts --outDir dist
+RUN npx tsup src/server.ts --format esm --outDir dist
 
 # Stage 2: Run
 FROM node:22-alpine
