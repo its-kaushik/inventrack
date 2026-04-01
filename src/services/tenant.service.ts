@@ -1,14 +1,13 @@
 import { eq } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
-import { db, queryClient } from '../config/database.js';
+import { db } from '../config/database.js';
 import { tenants } from '../db/schema/tenants.js';
 import { users } from '../db/schema/users.js';
 import { categories } from '../db/schema/categories.js';
 import { sizeSystems } from '../db/schema/categories.js';
-import { brands } from '../db/schema/brands.js';
 import { defaultCategories, defaultSizeSystems } from '../db/seed/defaults.js';
 import { DEFAULT_TENANT_SETTINGS } from '../lib/constants.js';
-import { NotFoundError, ValidationError } from '../lib/errors.js';
+import { NotFoundError } from '../lib/errors.js';
 
 interface CreateTenantInput {
   storeName: string;
@@ -27,32 +26,38 @@ export async function createTenant(input: CreateTenantInput) {
   // Use raw SQL transaction for atomicity across multiple inserts
   const result = await db.transaction(async (tx) => {
     // 1. Create tenant
-    const [tenant] = await tx.insert(tenants).values({
-      name: input.storeName,
-      address: input.address,
-      phone: input.phone,
-      email: input.email,
-      gstin: input.gstin,
-      gstScheme: input.gstScheme || 'regular',
-      settings: DEFAULT_TENANT_SETTINGS,
-    }).returning();
+    const [tenant] = await tx
+      .insert(tenants)
+      .values({
+        name: input.storeName,
+        address: input.address,
+        phone: input.phone,
+        email: input.email,
+        gstin: input.gstin,
+        gstScheme: input.gstScheme || 'regular',
+        settings: DEFAULT_TENANT_SETTINGS,
+      })
+      .returning();
 
     // 2. Create owner user
-    const [owner] = await tx.insert(users).values({
-      tenantId: tenant.id,
-      name: input.ownerName,
-      phone: input.phone,
-      email: input.email,
-      passwordHash,
-      role: 'owner',
-    }).returning({
-      id: users.id,
-      tenantId: users.tenantId,
-      name: users.name,
-      phone: users.phone,
-      email: users.email,
-      role: users.role,
-    });
+    const [owner] = await tx
+      .insert(users)
+      .values({
+        tenantId: tenant.id,
+        name: input.ownerName,
+        phone: input.phone,
+        email: input.email,
+        passwordHash,
+        role: 'owner',
+      })
+      .returning({
+        id: users.id,
+        tenantId: users.tenantId,
+        name: users.name,
+        phone: users.phone,
+        email: users.email,
+        role: users.role,
+      });
 
     // 3. Seed default categories
     for (const cat of defaultCategories) {
@@ -147,22 +152,21 @@ export async function getStore(tenantId: string) {
   return tenant;
 }
 
-export async function updateStore(tenantId: string, patch: Partial<{
-  name: string;
-  address: string;
-  phone: string;
-  email: string;
-  logoUrl: string;
-  gstin: string;
-  gstScheme: 'regular' | 'composition';
-  financialYearStart: number;
-  invoicePrefix: string;
-}>) {
-  const [updated] = await db
-    .update(tenants)
-    .set(patch)
-    .where(eq(tenants.id, tenantId))
-    .returning();
+export async function updateStore(
+  tenantId: string,
+  patch: Partial<{
+    name: string;
+    address: string;
+    phone: string;
+    email: string;
+    logoUrl: string;
+    gstin: string;
+    gstScheme: 'regular' | 'composition';
+    financialYearStart: number;
+    invoicePrefix: string;
+  }>,
+) {
+  const [updated] = await db.update(tenants).set(patch).where(eq(tenants.id, tenantId)).returning();
 
   if (!updated) throw new NotFoundError('Tenant', tenantId);
   return updated;
