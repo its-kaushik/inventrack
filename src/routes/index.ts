@@ -10,6 +10,10 @@ import labelsRouter from './labels.routes.js';
 import billsRouter from './bills.routes.js';
 import purchasesRouter from './purchases.routes.js';
 import uploadsRouter from './uploads.routes.js';
+import suppliersRouter from './suppliers.routes.js';
+import customersRouter from './customers.routes.js';
+import cashRegisterRouter from './cash-register.routes.js';
+import dashboardRouter from './dashboard.routes.js';
 import type { AppEnv } from '../types/hono.js';
 
 const api = new Hono<AppEnv>();
@@ -25,5 +29,9 @@ api.route('/labels', labelsRouter);
 api.route('/bills', billsRouter);
 api.route('/purchases', purchasesRouter);
 api.route('/uploads', uploadsRouter);
+api.route('/suppliers', suppliersRouter);
+api.route('/customers', customersRouter);
+api.route('/cash-register', cashRegisterRouter);
+api.route('/dashboard', dashboardRouter);
 
 export default api;
