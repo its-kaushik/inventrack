@@ -25,11 +25,14 @@ const envSchema = z.object({
   SMTP_PORT: z.coerce.number().optional().default(587),
   SMTP_USER: z.string().optional().default(''),
   SMTP_PASS: z.string().optional().default(''),
+
+  CORS_ORIGINS: z.string().optional().default(''),
 });
 
 const parsed = envSchema.safeParse(process.env);
 
 if (!parsed.success) {
+  // Logger not yet available — env validation must use console
   console.error('Invalid environment variables:', parsed.error.flatten().fieldErrors);
   process.exit(1);
 }

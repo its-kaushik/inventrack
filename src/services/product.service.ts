@@ -73,7 +73,9 @@ export async function listProducts(tenantId: string, filters: ProductFilters) {
   const limit = Math.min(filters.limit || 20, 100);
   const offset = filters.offset || 0;
 
-  const items = await db.select(allColumns).from(products)
+  const items = await db
+    .select(allColumns)
+    .from(products)
     .where(and(...conditions))
     .orderBy(desc(products.createdAt))
     .limit(limit + 1)
@@ -86,7 +88,9 @@ export async function listProducts(tenantId: string, filters: ProductFilters) {
 }
 
 export async function getProductById(tenantId: string, id: string) {
-  const [product] = await db.select(allColumns).from(products)
+  const [product] = await db
+    .select(allColumns)
+    .from(products)
     .where(and(eq(products.id, id), eq(products.tenantId, tenantId)))
     .limit(1);
 
@@ -94,56 +98,63 @@ export async function getProductById(tenantId: string, id: string) {
   return product;
 }
 
-export async function createProduct(tenantId: string, input: {
-  name: string;
-  sku: string;
-  barcode?: string;
-  categoryId: string;
-  subTypeId?: string;
-  brandId?: string;
-  size?: string;
-  color?: string;
-  hsnCode?: string;
-  gstRate?: number;
-  sellingPrice: number;
-  costPrice?: number;
-  mrp?: number;
-  catalogDiscountPct?: number;
-  minStockLevel?: number;
-  reorderPoint?: number;
-  description?: string;
-  imageUrls?: string[];
-}) {
+export async function createProduct(
+  tenantId: string,
+  input: {
+    name: string;
+    sku: string;
+    barcode?: string;
+    categoryId: string;
+    subTypeId?: string;
+    brandId?: string;
+    size?: string;
+    color?: string;
+    hsnCode?: string;
+    gstRate?: number;
+    sellingPrice: number;
+    costPrice?: number;
+    mrp?: number;
+    catalogDiscountPct?: number;
+    minStockLevel?: number;
+    reorderPoint?: number;
+    description?: string;
+    imageUrls?: string[];
+  },
+) {
   try {
     const barcodeValue = input.barcode || input.sku;
 
-    const [product] = await db.insert(products).values({
-      tenantId,
-      name: input.name,
-      sku: input.sku,
-      barcode: barcodeValue,
-      categoryId: input.categoryId,
-      subTypeId: input.subTypeId,
-      brandId: input.brandId,
-      size: input.size,
-      color: input.color,
-      hsnCode: input.hsnCode,
-      gstRate: String(input.gstRate ?? 5),
-      sellingPrice: String(input.sellingPrice),
-      costPrice: String(input.costPrice ?? 0),
-      mrp: input.mrp ? String(input.mrp) : undefined,
-      catalogDiscountPct: String(input.catalogDiscountPct ?? 0),
-      minStockLevel: input.minStockLevel ?? 10,
-      reorderPoint: input.reorderPoint,
-      description: input.description,
-      imageUrls: input.imageUrls ?? [],
-    }).returning(allColumns);
+    const [product] = await db
+      .insert(products)
+      .values({
+        tenantId,
+        name: input.name,
+        sku: input.sku,
+        barcode: barcodeValue,
+        categoryId: input.categoryId,
+        subTypeId: input.subTypeId,
+        brandId: input.brandId,
+        size: input.size,
+        color: input.color,
+        hsnCode: input.hsnCode,
+        gstRate: String(input.gstRate ?? 5),
+        sellingPrice: String(input.sellingPrice),
+        costPrice: String(input.costPrice ?? 0),
+        mrp: input.mrp ? String(input.mrp) : undefined,
+        catalogDiscountPct: String(input.catalogDiscountPct ?? 0),
+        minStockLevel: input.minStockLevel ?? 10,
+        reorderPoint: input.reorderPoint,
+        description: input.description,
+        imageUrls: input.imageUrls ?? [],
+      })
+      .returning(allColumns);
 
     return product;
   } catch (err: any) {
     if (err.code === '23505') {
       if (err.constraint_name?.includes('sku')) throw new DuplicateEntryError('Product', 'sku');
-      if (err.constraint_name?.includes('barcode')) throw new DuplicateEntryError('Product', 'barcode');
+      if (err.constraint_name?.includes('barcode'))
+        throw new DuplicateEntryError('Product', 'barcode');
       throw new DuplicateEntryError('Product', 'unique field');
     }
     throw err;
@@ -159,7 +170,9 @@ export async function updateProduct(tenantId: string, id: string, patch: Record<
     }
   }
 
-  const [updated] = await db.update(products).set(dbPatch)
+  const [updated] = await db
+    .update(products)
+    .set(dbPatch)
     .where(and(eq(products.id, id), eq(products.tenantId, tenantId)))
     .returning(allColumns);
 
@@ -168,7 +181,9 @@ export async function updateProduct(tenantId: string, id: string, patch: Record<
 }
 
 export async function softDeleteProduct(tenantId: string, id: string) {
-  const [updated] = await db.update(products).set({ isActive: false })
+  const [updated] = await db
+    .update(products)
+    .set({ isActive: false })
     .where(and(eq(products.id, id), eq(products.tenantId, tenantId)))
     .returning({ id: products.id });
 
@@ -180,23 +195,34 @@ export async function searchProducts(tenantId: string, query: string) {
   if (!query || query.length < 1) return [];
 
   // Try exact match on barcode or SKU first (fastest path)
-  const exactMatches = await db.select(allColumns).from(products)
-    .where(and(
-      eq(products.tenantId, tenantId),
-      eq(products.isActive, true),
-      or(eq(products.barcode, query), eq(products.sku, query))
-    ))
+  const exactMatches = await db
+    .select(allColumns)
+    .from(products)
+    .where(
+      and(
+        eq(products.tenantId, tenantId),
+        eq(products.isActive, true),
+        or(eq(products.barcode, query), eq(products.sku, query)),
+      ),
+    )
     .limit(1);
 
   if (exactMatches.length > 0) return exactMatches;
 
-  // Fallback to fuzzy name search using ILIKE (trigram index helps performance)
-  return db.select(allColumns).from(products)
-    .where(and(
-      eq(products.tenantId, tenantId),
-      eq(products.isActive, true),
-      ilike(products.name, `%${query}%`)
-    ))
-    .orderBy(products.name)
+  // Fallback to fuzzy name search using trigram similarity (leverages GIN index)
+  return db
+    .select({
+      ...allColumns,
+      similarity: sql<number>`similarity(${products.name}, ${query})`.as('similarity'),
+    })
+    .from(products)
+    .where(
+      and(
+        eq(products.tenantId, tenantId),
+        eq(products.isActive, true),
+        sql`${products.name} % ${query} OR ${products.name} ILIKE ${'%' + query + '%'}`,
+      ),
+    )
+    .orderBy(sql`similarity(${products.name}, ${query}) DESC`)
     .limit(20);
 }

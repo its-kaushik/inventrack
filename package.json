@@ -51,7 +51,7 @@
     "@eslint/js": "^10.0.1",
     "@types/bcryptjs": "^2.4.6",
     "@types/bwip-js": "^3.2.3",
-    "@types/node": "^25.5.0",
+    "@types/node": "^25.5.2",
     "drizzle-kit": "^0.31.10",
     "eslint": "^10.1.0",
     "lint-staged": "^16.4.0",

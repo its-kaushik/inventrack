@@ -36,26 +36,39 @@ interface ComputedLineItem {
 // ======================== MODULAR HELPERS ========================
 
 async function validateDiscountLimits(
-  tx: any, tenantId: string, role: UserRole, additionalDiscount: number
+  tx: any,
+  tenantId: string,
+  role: UserRole,
+  additionalDiscount: number,
 ) {
   if (role !== 'salesperson' || additionalDiscount <= 0) return;
 
-  const [tenant] = await tx.select({ settings: tenants.settings })
-    .from(tenants).where(eq(tenants.id, tenantId)).limit(1);
+  const [tenant] = await tx
+    .select({ settings: tenants.settings })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId))
+    .limit(1);
 
   const maxAmount = (tenant?.settings as any)?.max_salesperson_discount_amount ?? 500;
   if (additionalDiscount > maxAmount) {
-    throw new ForbiddenError(`Discount ₹${additionalDiscount} exceeds your limit of ₹${maxAmount}. Ask a manager to approve.`);
+    throw new ForbiddenError(
+      `Discount ₹${additionalDiscount} exceeds your limit of ₹${maxAmount}. Ask a manager to approve.`,
+    );
   }
 }
 
 async function computeLineItems(
-  tx: any, tenantId: string, items: CreateBillInput['items'], gstScheme: GstScheme
+  tx: any,
+  tenantId: string,
+  items: CreateBillInput['items'],
+  gstScheme: GstScheme,
 ): Promise<ComputedLineItem[]> {
   const lineItems: ComputedLineItem[] = [];
 
   for (const item of items) {
-    const [product] = await tx.select().from(products)
+    const [product] = await tx
+      .select()
+      .from(products)
       .where(and(eq(products.id, item.productId), eq(products.tenantId, tenantId)))
       .limit(1);
 
@@ -70,39 +83,57 @@ async function computeLineItems(
     const gst = backCalculateGst(
       toDbDecimal(unitPriceAfterDiscount),
       Number(product.gstRate),
-      gstScheme
+      gstScheme,
     );
 
-    lineItems.push({ product, quantity: item.quantity, catalogDiscountPerUnit, unitPriceAfterDiscount, lineTotal, gst });
+    lineItems.push({
+      product,
+      quantity: item.quantity,
+      catalogDiscountPerUnit,
+      unitPriceAfterDiscount,
+      lineTotal,
+      gst,
+    });
   }
 
   return lineItems;
 }
 
 function computeBillTotals(lineItems: ComputedLineItem[], additionalDiscountAmount: number) {
-  const subtotal = decimalSum(lineItems, (l) => new Decimal(l.product.sellingPrice).times(l.quantity));
-  const catalogDiscountTotal = decimalSum(lineItems, (l) => l.catalogDiscountPerUnit.times(l.quantity));
+  const subtotal = decimalSum(lineItems, (l) =>
+    new Decimal(l.product.sellingPrice).times(l.quantity),
+  );
+  const catalogDiscountTotal = decimalSum(lineItems, (l) =>
+    l.catalogDiscountPerUnit.times(l.quantity),
+  );
   const taxAmount = decimalSum(lineItems, (l) => new Decimal(l.gst.totalGst).times(l.quantity));
   const additionalDiscount = new Decimal(additionalDiscountAmount);
-  const netAmount = subtotal.minus(catalogDiscountTotal).minus(additionalDiscount).toDecimalPlaces(2);
+  const netAmount = subtotal
+    .minus(catalogDiscountTotal)
+    .minus(additionalDiscount)
+    .toDecimalPlaces(2);
 
   return { subtotal, catalogDiscountTotal, taxAmount, netAmount, additionalDiscount };
 }
 
 function validatePayments(
-  payments: CreateBillInput['payments'], netAmount: Decimal, customerId?: string | null
+  payments: CreateBillInput['payments'],
+  netAmount: Decimal,
+  customerId?: string | null,
 ) {
   const paymentTotal = decimalSum(payments, (p) => new Decimal(p.amount));
 
   if (!paymentTotal.equals(netAmount)) {
     throw new ValidationError(
-      `Payment total ₹${toDbDecimal(paymentTotal)} does not match bill total ₹${toDbDecimal(netAmount)}`
+      `Payment total ₹${toDbDecimal(paymentTotal)} does not match bill total ₹${toDbDecimal(netAmount)}`,
     );
   }
 
   const hasCredit = payments.some((p) => p.mode === 'credit');
   if (hasCredit && !customerId) {
-    throw new ValidationError('Credit payment requires a customer. Select or create a customer first.');
+    throw new ValidationError(
+      'Credit payment requires a customer. Select or create a customer first.',
+    );
   }
 }
 
@@ -125,15 +156,19 @@ async function insertBillItemRecords(tx: any, billId: string, lineItems: Compute
       catalogDiscountPct: line.product.catalogDiscountPct,
       catalogDiscountAmt: String(toDbDecimal(line.catalogDiscountPerUnit.times(line.quantity))),
       gstRate: line.product.gstRate,
-      cgstAmount: String(line.gst.cgst * line.quantity),
-      sgstAmount: String(line.gst.sgst * line.quantity),
+      cgstAmount: String(new Decimal(line.gst.cgst).times(line.quantity).toDecimalPlaces(2)),
+      sgstAmount: String(new Decimal(line.gst.sgst).times(line.quantity).toDecimalPlaces(2)),
       costPrice: line.product.costPrice,
       lineTotal: String(toDbDecimal(line.lineTotal)),
     });
   }
 }
 
-async function insertBillPaymentRecords(tx: any, billId: string, payments: CreateBillInput['payments']) {
+async function insertBillPaymentRecords(
+  tx: any,
+  billId: string,
+  payments: CreateBillInput['payments'],
+) {
   for (const payment of payments) {
     await tx.insert(billPayments).values({
       billId,
@@ -145,7 +180,11 @@ async function insertBillPaymentRecords(tx: any, billId: string, payments: Creat
 }
 
 async function decrementStock(
-  tx: any, tenantId: string, userId: string, billId: string, lineItems: ComputedLineItem[]
+  tx: any,
+  tenantId: string,
+  userId: string,
+  billId: string,
+  lineItems: ComputedLineItem[],
 ) {
   for (const line of lineItems) {
     await tx.insert(stockEntries).values({
@@ -162,7 +201,12 @@ async function decrementStock(
 }
 
 async function recordCustomerCredit(
-  tx: any, tenantId: string, customerId: string, amount: number, billId: string, userId: string
+  tx: any,
+  tenantId: string,
+  customerId: string,
+  amount: number,
+  billId: string,
+  userId: string,
 ) {
   await ledgerService.createEntry(tx, {
     tenantId,
@@ -181,16 +225,23 @@ async function recordCustomerCredit(
 }
 
 async function recordCashRegisterEntry(
-  tx: any, tenantId: string, userId: string, amount: number, billId: string
+  tx: any,
+  tenantId: string,
+  userId: string,
+  amount: number,
+  billId: string,
 ) {
   // Find open register for this user
-  const [register] = await tx.select({ id: cashRegisters.id })
+  const [register] = await tx
+    .select({ id: cashRegisters.id })
     .from(cashRegisters)
-    .where(and(
-      eq(cashRegisters.tenantId, tenantId),
-      eq(cashRegisters.userId, userId),
-      eq(cashRegisters.status, 'open')
-    ))
+    .where(
+      and(
+        eq(cashRegisters.tenantId, tenantId),
+        eq(cashRegisters.userId, userId),
+        eq(cashRegisters.status, 'open'),
+      ),
+    )
     .limit(1);
 
   if (register) {
@@ -208,20 +259,31 @@ async function recordCashRegisterEntry(
 // ======================== IDEMPOTENCY HELPER ========================
 
 function isUniqueViolation(err: unknown, constraintName: string): boolean {
-  return err instanceof Error
-    && 'code' in err && (err as any).code === '23505'
-    && 'constraint_name' in err && (err as any).constraint_name === constraintName;
+  return (
+    err instanceof Error &&
+    'code' in err &&
+    (err as any).code === '23505' &&
+    'constraint_name' in err &&
+    (err as any).constraint_name === constraintName
+  );
 }
 
 // ======================== MAIN CREATE BILL ========================
 
-export async function createBill(tenantId: string, userId: string, role: UserRole, input: CreateBillInput) {
+export async function createBill(
+  tenantId: string,
+  userId: string,
+  role: UserRole,
+  input: CreateBillInput,
+) {
   try {
     return await _createBillTransaction(tenantId, userId, role, input);
   } catch (err) {
     // Idempotency: catch PostgreSQL unique_violation on client_id
     if (input.clientId && isUniqueViolation(err, 'idx_bills_tenant_client_id')) {
-      const [existing] = await db.select().from(bills)
+      const [existing] = await db
+        .select()
+        .from(bills)
         .where(and(eq(bills.tenantId, tenantId), eq(bills.clientId, input.clientId)))
         .limit(1);
       if (existing) return existing;
@@ -230,7 +292,12 @@ export async function createBill(tenantId: string, userId: string, role: UserRol
   }
 }
 
-async function _createBillTransaction(tenantId: string, userId: string, role: UserRole, input: CreateBillInput) {
+async function _createBillTransaction(
+  tenantId: string,
+  userId: string,
+  role: UserRole,
+  input: CreateBillInput,
+) {
   return db.transaction(async (tx) => {
     const additionalDiscountAmount = input.additionalDiscountAmount ?? 0;
 
@@ -238,10 +305,14 @@ async function _createBillTransaction(tenantId: string, userId: string, role: Us
     await validateDiscountLimits(tx, tenantId, role, additionalDiscountAmount);
 
     // 2. Get tenant for GST scheme
-    const [tenant] = await tx.select({
-      gstScheme: tenants.gstScheme,
-      invoicePrefix: tenants.invoicePrefix,
-    }).from(tenants).where(eq(tenants.id, tenantId)).limit(1);
+    const [tenant] = await tx
+      .select({
+        gstScheme: tenants.gstScheme,
+        invoicePrefix: tenants.invoicePrefix,
+      })
+      .from(tenants)
+      .where(eq(tenants.id, tenantId))
+      .limit(1);
 
     if (!tenant) throw new NotFoundError('Tenant', tenantId);
 
@@ -287,7 +358,14 @@ async function _createBillTransaction(tenantId: string, userId: string, role: Us
     // 11. Customer credit (if credit payment)
     const creditPayment = input.payments.find((p) => p.mode === 'credit');
     if (creditPayment && input.customerId) {
-      await recordCustomerCredit(tx, tenantId, input.customerId, creditPayment.amount, bill.id, userId);
+      await recordCustomerCredit(
+        tx,
+        tenantId,
+        input.customerId,
+        creditPayment.amount,
+        bill.id,
+        userId,
+      );
     }
 
     // 12. Cash register entry (if cash payment)
@@ -302,10 +380,16 @@ async function _createBillTransaction(tenantId: string, userId: string, role: Us
 
 // ======================== READ OPERATIONS ========================
 
-export async function listBills(tenantId: string, filters: {
-  customerId?: string; salespersonId?: string; status?: string;
-  limit?: number; offset?: number;
-}) {
+export async function listBills(
+  tenantId: string,
+  filters: {
+    customerId?: string;
+    salespersonId?: string;
+    status?: string;
+    limit?: number;
+    offset?: number;
+  },
+) {
   const conditions: any[] = [eq(bills.tenantId, tenantId)];
   if (filters.customerId) conditions.push(eq(bills.customerId, filters.customerId));
   if (filters.salespersonId) conditions.push(eq(bills.salespersonId, filters.salespersonId));
@@ -314,7 +398,9 @@ export async function listBills(tenantId: string, filters: {
   const limit = Math.min(filters.limit || 20, 100);
   const offset = filters.offset || 0;
 
-  const items = await db.select().from(bills)
+  const items = await db
+    .select()
+    .from(bills)
     .where(and(...conditions))
     .orderBy(desc(bills.createdAt))
     .limit(limit + 1)
@@ -327,17 +413,17 @@ export async function listBills(tenantId: string, filters: {
 }
 
 export async function getBillById(tenantId: string, billId: string) {
-  const [bill] = await db.select().from(bills)
+  const [bill] = await db
+    .select()
+    .from(bills)
     .where(and(eq(bills.id, billId), eq(bills.tenantId, tenantId)))
     .limit(1);
 
   if (!bill) throw new NotFoundError('Bill', billId);
 
-  const items = await db.select().from(billItems)
-    .where(eq(billItems.billId, billId));
+  const items = await db.select().from(billItems).where(eq(billItems.billId, billId));
 
-  const payments = await db.select().from(billPayments)
-    .where(eq(billPayments.billId, billId));
+  const payments = await db.select().from(billPayments).where(eq(billPayments.billId, billId));
 
   return { ...bill, items, payments };
 }
@@ -346,14 +432,18 @@ export async function getBillForPrint(tenantId: string, billId: string) {
   const bill = await getBillById(tenantId, billId);
 
   // Get tenant info for receipt header
-  const [tenant] = await db.select({
-    name: tenants.name,
-    address: tenants.address,
-    phone: tenants.phone,
-    gstin: tenants.gstin,
-    gstScheme: tenants.gstScheme,
-    settings: tenants.settings,
-  }).from(tenants).where(eq(tenants.id, tenantId)).limit(1);
+  const [tenant] = await db
+    .select({
+      name: tenants.name,
+      address: tenants.address,
+      phone: tenants.phone,
+      gstin: tenants.gstin,
+      gstScheme: tenants.gstScheme,
+      settings: tenants.settings,
+    })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId))
+    .limit(1);
 
   const isComposition = bill.gstSchemeAtSale === 'composition';
 

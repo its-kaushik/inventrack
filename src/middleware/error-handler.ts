@@ -1,5 +1,6 @@
 import type { ErrorHandler } from 'hono';
 import { AppError } from '../lib/errors.js';
+import { logger } from '../lib/logger.js';
 
 export const errorHandler: ErrorHandler = (err, c) => {
   if (err instanceof AppError) {
@@ -13,11 +14,11 @@ export const errorHandler: ErrorHandler = (err, c) => {
           details: err.details,
         },
       },
-      err.statusCode as any
+      err.statusCode as any,
     );
   }
 
-  console.error('Unhandled error:', err);
+  logger.error({ err }, 'Unhandled error');
 
   return c.json(
     {
@@ -29,6 +30,6 @@ export const errorHandler: ErrorHandler = (err, c) => {
         details: null,
       },
     },
-    500
+    500,
   );
 };

@@ -6,6 +6,7 @@ import { authMiddleware } from '../middleware/auth.js';
 import { tenantScope } from '../middleware/tenant-scope.js';
 import { validate } from '../middleware/validate.js';
 import { success } from '../lib/response.js';
+import { formatINR } from '../lib/indian-format.js';
 import type { AppEnv } from '../types/hono.js';
 
 const labelsRouter = new Hono<AppEnv>();
@@ -13,11 +14,16 @@ const labelsRouter = new Hono<AppEnv>();
 labelsRouter.use('*', authMiddleware, tenantScope);
 
 const generateLabelsSchema = z.object({
-  items: z.array(z.object({
-    productId: z.string().uuid(),
-    quantity: z.number().int().positive(),
-  })).min(1),
+  items: z
+    .array(
+      z.object({
+        productId: z.string().uuid(),
+        quantity: z.number().int().positive(),
+      }),
+    )
+    .min(1),
   templateId: z.string().optional().default('default'),
+  format: z.enum(['html', 'json']).optional().default('html'),
 });
 
 labelsRouter.post('/generate', validate(generateLabelsSchema), async (c) => {
@@ -51,14 +57,132 @@ labelsRouter.post('/generate', validate(generateLabelsSchema), async (c) => {
     });
   }
 
+  // Return printable HTML label sheet
+  if (input.format === 'html') {
+    const html = generateLabelSheetHtml(labels, input.templateId);
+    c.header('Content-Type', 'text/html; charset=utf-8');
+    return c.body(html);
+  }
+
+  // Return JSON data (for custom rendering on frontend)
   return c.json(success({ labels, templateId: input.templateId }));
 });
 
 labelsRouter.get('/templates', async (c) => {
-  return c.json(success([
-    { id: 'default', name: 'Standard Label', description: 'Barcode + Name + Size + Price', fields: ['barcode', 'name', 'size', 'price'] },
-    { id: 'minimal', name: 'Minimal Label', description: 'Barcode + Price only', fields: ['barcode', 'price'] },
-  ]));
+  return c.json(
+    success([
+      {
+        id: 'default',
+        name: 'Standard Label (A4 3x10)',
+        description: 'Barcode + Name + Size + Price on A4 sheet',
+        fields: ['barcode', 'name', 'size', 'price', 'sku'],
+      },
+      {
+        id: 'minimal',
+        name: 'Minimal Label',
+        description: 'Barcode + Price only',
+        fields: ['barcode', 'price'],
+      },
+      {
+        id: 'thermal',
+        name: 'Thermal (50x25mm)',
+        description: 'Single label for thermal printer',
+        fields: ['barcode', 'name', 'size', 'price'],
+      },
+    ]),
+  );
 });
+
+function generateLabelSheetHtml(
+  labels: Array<{
+    productName: string;
+    sku: string;
+    barcode: string;
+    size: string | null;
+    sellingPrice: string;
+    quantity: number;
+    barcodeDataUrl: string;
+  }>,
+  templateId: string,
+): string {
+  // Expand labels by quantity
+  const expandedLabels: typeof labels = [];
+  for (const label of labels) {
+    for (let i = 0; i < label.quantity; i++) {
+      expandedLabels.push(label);
+    }
+  }
+
+  const isThermal = templateId === 'thermal';
+  const isMinimal = templateId === 'minimal';
+  const columns = isThermal ? 1 : 3;
+
+  const labelHtmlItems = expandedLabels.map((label) => {
+    const price = formatINR(Number(label.sellingPrice));
+    if (isMinimal) {
+      return `
+        <div class="label">
+          <img src="${label.barcodeDataUrl}" class="barcode-img" alt="${label.barcode}">
+          <div class="price">${price}</div>
+        </div>`;
+    }
+    return `
+      <div class="label">
+        <div class="product-name">${escapeHtml(label.productName)}</div>
+        ${label.size ? `<div class="size">Size: ${escapeHtml(label.size)}</div>` : ''}
+        <img src="${label.barcodeDataUrl}" class="barcode-img" alt="${label.barcode}">
+        <div class="sku">${escapeHtml(label.sku)}</div>
+        <div class="price">${price}</div>
+      </div>`;
+  });
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Labels</title>
+  <style>
+    @media print {
+      body { margin: 0; }
+      .no-print { display: none; }
+    }
+    body { font-family: Arial, sans-serif; margin: 0; padding: ${isThermal ? '0' : '10mm'}; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(${columns}, 1fr);
+      gap: ${isThermal ? '2mm' : '4mm'};
+    }
+    .label {
+      border: 1px dashed #ccc;
+      padding: ${isThermal ? '2mm' : '3mm'};
+      text-align: center;
+      page-break-inside: avoid;
+      overflow: hidden;
+    }
+    .product-name { font-size: ${isThermal ? '8pt' : '9pt'}; font-weight: bold; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .size { font-size: 8pt; color: #555; }
+    .barcode-img { max-width: 100%; height: ${isThermal ? '15mm' : '20mm'}; margin: 2px 0; }
+    .sku { font-size: 7pt; color: #777; }
+    .price { font-size: ${isThermal ? '10pt' : '11pt'}; font-weight: bold; margin-top: 2px; }
+    .no-print { text-align: center; padding: 10px; }
+    .no-print button { padding: 8px 24px; font-size: 14px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="no-print"><button onclick="window.print()">Print Labels</button></div>
+  <div class="grid">
+    ${labelHtmlItems.join('\n')}
+  </div>
+</body>
+</html>`;
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
 
 export default labelsRouter;

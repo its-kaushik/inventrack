@@ -14,9 +14,17 @@ import suppliersRouter from './suppliers.routes.js';
 import customersRouter from './customers.routes.js';
 import cashRegisterRouter from './cash-register.routes.js';
 import dashboardRouter from './dashboard.routes.js';
+import { apiRateLimit } from '../middleware/rate-limit.js';
+import { auditMiddleware } from '../middleware/audit.js';
 import type { AppEnv } from '../types/hono.js';
 
 const api = new Hono<AppEnv>();
+
+// Global API rate limit: 100 req/sec per tenant (skipped if Redis unavailable)
+api.use('*', apiRateLimit);
+
+// Audit logging for all write operations (POST/PUT/PATCH/DELETE)
+api.use('*', auditMiddleware);
 
 api.route('/auth', auth);
 api.route('/setup', setup);

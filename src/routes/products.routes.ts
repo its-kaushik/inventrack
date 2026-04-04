@@ -34,11 +34,13 @@ productsRouter.get('/', async (c) => {
   };
 
   const result = await productService.listProducts(tenantId, filters);
-  return c.json(paginated(
-    productService.serializeProducts(result.items, role),
-    result.hasMore ? String(result.offset) : null,
-    result.hasMore,
-  ));
+  return c.json(
+    paginated(
+      productService.serializeProducts(result.items, role),
+      result.hasMore ? String(result.offset) : null,
+      result.hasMore,
+    ),
+  );
 });
 
 productsRouter.get('/:id', async (c) => {
@@ -69,41 +71,53 @@ const createProductSchema = z.object({
   imageUrls: z.array(z.string()).optional(),
 });
 
-productsRouter.post('/', requireRole('owner', 'manager'), validate(createProductSchema), async (c) => {
-  const { tenantId, role } = c.get('tenant');
-  const input = c.get('validatedBody') as z.infer<typeof createProductSchema>;
-  const product = await productService.createProduct(tenantId, input);
-  return c.json(success(productService.serializeProduct(product, role)), 201);
-});
+productsRouter.post(
+  '/',
+  requireRole('owner', 'manager'),
+  validate(createProductSchema),
+  async (c) => {
+    const { tenantId, role } = c.get('tenant');
+    const input = c.get('validatedBody') as z.infer<typeof createProductSchema>;
+    const product = await productService.createProduct(tenantId, input);
+    return c.json(success(productService.serializeProduct(product, role)), 201);
+  },
+);
 
-const updateProductSchema = z.object({
-  name: z.string().min(1).optional(),
-  sku: z.string().min(1).max(50).optional(),
-  barcode: z.string().max(50).optional(),
-  categoryId: z.string().uuid().optional(),
-  subTypeId: z.string().uuid().nullable().optional(),
-  brandId: z.string().uuid().nullable().optional(),
-  size: z.string().max(20).nullable().optional(),
-  color: z.string().max(50).nullable().optional(),
-  hsnCode: z.string().max(8).optional(),
-  gstRate: z.number().min(0).max(100).optional(),
-  sellingPrice: z.number().positive().optional(),
-  costPrice: z.number().min(0).optional(),
-  mrp: z.number().positive().nullable().optional(),
-  catalogDiscountPct: z.number().min(0).max(100).optional(),
-  minStockLevel: z.number().int().min(0).optional(),
-  reorderPoint: z.number().int().min(0).nullable().optional(),
-  description: z.string().nullable().optional(),
-  imageUrls: z.array(z.string()).optional(),
-}).refine(d => Object.keys(d).length > 0, { message: 'At least one field required' });
+const updateProductSchema = z
+  .object({
+    name: z.string().min(1).optional(),
+    sku: z.string().min(1).max(50).optional(),
+    barcode: z.string().max(50).optional(),
+    categoryId: z.string().uuid().optional(),
+    subTypeId: z.string().uuid().nullable().optional(),
+    brandId: z.string().uuid().nullable().optional(),
+    size: z.string().max(20).nullable().optional(),
+    color: z.string().max(50).nullable().optional(),
+    hsnCode: z.string().max(8).optional(),
+    gstRate: z.number().min(0).max(100).optional(),
+    sellingPrice: z.number().positive().optional(),
+    costPrice: z.number().min(0).optional(),
+    mrp: z.number().positive().nullable().optional(),
+    catalogDiscountPct: z.number().min(0).max(100).optional(),
+    minStockLevel: z.number().int().min(0).optional(),
+    reorderPoint: z.number().int().min(0).nullable().optional(),
+    description: z.string().nullable().optional(),
+    imageUrls: z.array(z.string()).optional(),
+  })
+  .refine((d) => Object.keys(d).length > 0, { message: 'At least one field required' });
 
-productsRouter.put('/:id', requireRole('owner', 'manager'), validate(updateProductSchema), async (c) => {
-  const { tenantId, role } = c.get('tenant');
-  const id = c.req.param('id')!;
-  const patch = c.get('validatedBody') as Record<string, unknown>;
-  const product = await productService.updateProduct(tenantId, id, patch);
-  return c.json(success(productService.serializeProduct(product, role)));
-});
+productsRouter.put(
+  '/:id',
+  requireRole('owner', 'manager'),
+  validate(updateProductSchema),
+  async (c) => {
+    const { tenantId, role } = c.get('tenant');
+    const id = c.req.param('id')!;
+    const patch = c.get('validatedBody') as Record<string, unknown>;
+    const product = await productService.updateProduct(tenantId, id, patch);
+    return c.json(success(productService.serializeProduct(product, role)));
+  },
+);
 
 // Soft-delete only — NEVER hard delete
 productsRouter.delete('/:id', requireRole('owner'), async (c) => {
@@ -126,7 +140,17 @@ productsRouter.post('/:id/barcode', requireRole('owner', 'manager'), async (c) =
 
 // Bulk import stub (real implementation needs BullMQ — Phase 2)
 productsRouter.post('/import', requireRole('owner', 'manager'), async (c) => {
-  return c.json(success({ message: 'Bulk import coming soon. Use POST /products for individual creation.' }));
+  return c.json(
+    success({ message: 'Bulk import coming soon. Use POST /products for individual creation.' }),
+  );
+});
+
+// Import job status (stub — will poll BullMQ when implemented)
+productsRouter.get('/import/:jobId/status', requireRole('owner', 'manager'), async (c) => {
+  const jobId = c.req.param('jobId')!;
+  return c.json(
+    success({ jobId, status: 'not_implemented', message: 'Import jobs not yet available.' }),
+  );
 });
 
 export default productsRouter;

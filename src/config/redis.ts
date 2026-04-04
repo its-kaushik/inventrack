@@ -1,5 +1,6 @@
 import Redis from 'ioredis';
 import { env } from './env.js';
+import { logger } from '../lib/logger.js';
 
 let redis: Redis | null = null;
 
@@ -14,11 +15,11 @@ if (env.REDIS_URL) {
   });
 
   redis.on('error', (err) => {
-    console.warn('Redis connection error (non-fatal):', err.message);
+    logger.warn({ err: err.message }, 'Redis connection error (non-fatal)');
   });
 
   redis.connect().catch(() => {
-    console.warn('Redis not available — caching and rate limiting disabled');
+    logger.warn('Redis not available — caching and rate limiting disabled');
     redis = null;
   });
 }
