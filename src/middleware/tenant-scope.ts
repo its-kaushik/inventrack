@@ -5,23 +5,41 @@ import { tenants } from '../db/schema/tenants.js';
 import { AppError } from '../lib/errors.js';
 
 export const tenantScope = createMiddleware(async (c, next) => {
-  const { tenantId } = c.get('tenant');
+  // Super admins bypass tenant scoping
+  const admin = c.get('adminUser');
+  if (admin?.isSuperAdmin) {
+    await next();
+    return;
+  }
 
-  const [tenant] = await db
+  const tenant = c.get('tenant');
+  if (!tenant?.tenantId) {
+    throw new AppError(401, 'UNAUTHORIZED', 'No tenant context');
+  }
+
+  const [row] = await db
     .select({ status: tenants.status })
     .from(tenants)
-    .where(eq(tenants.id, tenantId))
+    .where(eq(tenants.id, tenant.tenantId))
     .limit(1);
 
-  if (!tenant) {
+  if (!row) {
     throw new AppError(404, 'NOT_FOUND', 'Tenant not found');
   }
 
-  if (tenant.status === 'suspended') {
-    throw new AppError(403, 'TENANT_SUSPENDED', 'Your account has been suspended. Contact support.');
+  if (row.status === 'suspended') {
+    // Suspended tenants can still read data (GET) for export purposes
+    const method = c.req.method;
+    if (method !== 'GET') {
+      throw new AppError(
+        403,
+        'TENANT_SUSPENDED',
+        'Your account has been suspended. Read-only access is allowed for data export. Contact support.',
+      );
+    }
   }
 
-  if (tenant.status === 'deleted') {
+  if (row.status === 'deleted') {
     throw new AppError(404, 'NOT_FOUND', 'Tenant not found');
   }
 

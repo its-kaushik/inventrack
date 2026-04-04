@@ -18,3 +18,4 @@ export * from './sync-conflicts.js';
 export * from './bill-sequences.js';
 export * from './refresh-tokens.js';
 export * from './label-templates.js';
+export * from './super-admins.js';

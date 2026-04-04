@@ -2,7 +2,7 @@ import { createMiddleware } from 'hono/factory';
 import { jwtVerify } from 'jose';
 import { env } from '../config/env.js';
 import { AuthError } from '../lib/errors.js';
-import type { TenantContext } from '../types/context.js';
+import type { TenantContext, AdminContext } from '../types/context.js';
 
 const secret = new TextEncoder().encode(env.JWT_SECRET);
 
@@ -18,13 +18,21 @@ export const authMiddleware = createMiddleware(async (c, next) => {
   try {
     const { payload } = await jwtVerify(token, secret);
 
-    const tenantContext: TenantContext = {
-      userId: payload.sub as string,
-      tenantId: payload.tid as string,
-      role: payload.role as TenantContext['role'],
-    };
-
-    c.set('tenant', tenantContext);
+    // Super admin tokens have role='super_admin' and no tenant ID
+    if (payload.role === 'super_admin') {
+      const adminContext: AdminContext = {
+        adminId: payload.sub as string,
+        isSuperAdmin: true,
+      };
+      c.set('adminUser', adminContext);
+    } else {
+      const tenantContext: TenantContext = {
+        userId: payload.sub as string,
+        tenantId: payload.tid as string,
+        role: payload.role as TenantContext['role'],
+      };
+      c.set('tenant', tenantContext);
+    }
   } catch {
     throw new AuthError('Invalid or expired token');
   }

@@ -1,4 +1,6 @@
 import { Hono } from 'hono';
+import adminRouter from './admin.routes.js';
+import signupRouter from './signup.routes.js';
 import auth from './auth.routes.js';
 import setup from './setup.routes.js';
 import settings from './settings.routes.js';
@@ -35,6 +37,8 @@ api.use('*', apiRateLimit);
 // Audit logging for all write operations (POST/PUT/PATCH/DELETE)
 api.use('*', auditMiddleware);
 
+api.route('/admin', adminRouter);
+api.route('/signup', signupRouter);
 api.route('/auth', auth);
 api.route('/setup', setup);
 api.route('/settings', settings);

@@ -11,6 +11,7 @@ export const QUEUE_NAMES = {
   PO_PDF: 'po-pdf',
   REPORT_EXPORT: 'report-export',
   AUDIT_PARTITION: 'audit-partition',
+  TENANT_DATA_EXPORT: 'tenant-data-export',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -31,6 +32,7 @@ export const recurringExpensesQueue = createQueue(QUEUE_NAMES.RECURRING_EXPENSES
 export const poPdfQueue = createQueue(QUEUE_NAMES.PO_PDF);
 export const reportExportQueue = createQueue(QUEUE_NAMES.REPORT_EXPORT);
 export const auditPartitionQueue = createQueue(QUEUE_NAMES.AUDIT_PARTITION);
+export const tenantDataExportQueue = createQueue(QUEUE_NAMES.TENANT_DATA_EXPORT);
 
 export const allQueues = [
   heldBillsCleanupQueue,
@@ -42,4 +44,5 @@ export const allQueues = [
   poPdfQueue,
   reportExportQueue,
   auditPartitionQueue,
+  tenantDataExportQueue,
 ].filter((q): q is Queue => q !== null);

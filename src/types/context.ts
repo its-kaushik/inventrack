@@ -6,9 +6,15 @@ export interface TenantContext {
   role: 'owner' | 'manager' | 'salesperson';
 }
 
+export interface AdminContext {
+  adminId: string;
+  isSuperAdmin: true;
+}
+
 export type AppContext = Context<{
   Variables: {
     tenant: TenantContext;
+    adminUser?: AdminContext;
     validatedBody?: unknown;
   };
 }>;

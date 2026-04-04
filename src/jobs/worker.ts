@@ -11,6 +11,7 @@ import processRecurringExpenses from './processors/recurring-expenses.js';
 import processPoPdf from './processors/po-pdf.js';
 import processReportExport from './processors/report-export.js';
 import processAuditPartition from './processors/audit-partition.js';
+import processTenantDataExport from './processors/tenant-data-export.js';
 
 const workers: Worker[] = [];
 
@@ -28,6 +29,7 @@ export function startWorkers() {
     { name: QUEUE_NAMES.PO_PDF, processor: processPoPdf },
     { name: QUEUE_NAMES.REPORT_EXPORT, processor: processReportExport },
     { name: QUEUE_NAMES.AUDIT_PARTITION, processor: processAuditPartition },
+    { name: QUEUE_NAMES.TENANT_DATA_EXPORT, processor: processTenantDataExport },
   ];
 
   for (const { name, processor } of workerDefs) {
