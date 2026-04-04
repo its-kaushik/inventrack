@@ -23,8 +23,8 @@ auth.post('/login', loginRateLimit, validate(loginSchema), async (c) => {
 
   setCookie(c, 'refreshToken', result.refreshToken, {
     httpOnly: true,
-    secure: env.NODE_ENV === 'production',
-    sameSite: 'Strict',
+    secure: true,
+    sameSite: 'None',
     path: '/api/v1/auth',
     maxAge: env.JWT_REFRESH_TTL,
   });
@@ -55,8 +55,8 @@ auth.post('/refresh', async (c) => {
 
   setCookie(c, 'refreshToken', result.refreshToken, {
     httpOnly: true,
-    secure: env.NODE_ENV === 'production',
-    sameSite: 'Strict',
+    secure: true,
+    sameSite: 'None',
     path: '/api/v1/auth',
     maxAge: env.JWT_REFRESH_TTL,
   });
@@ -119,8 +119,8 @@ auth.post(
 
     setCookie(c, 'refreshToken', result.refreshToken, {
       httpOnly: true,
-      secure: env.NODE_ENV === 'production',
-      sameSite: 'Strict',
+      secure: true,
+      sameSite: 'None',
       path: '/api/v1/auth',
       maxAge: env.JWT_REFRESH_TTL,
     });
