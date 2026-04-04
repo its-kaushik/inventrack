@@ -7,6 +7,10 @@ export const QUEUE_NAMES = {
   SUPPLIER_PAYMENT_REMINDERS: 'supplier-payment-reminders',
   AGING_INVENTORY_DIGEST: 'aging-inventory-digest',
   DAILY_SALES_SUMMARY: 'daily-sales-summary',
+  RECURRING_EXPENSES: 'recurring-expenses',
+  PO_PDF: 'po-pdf',
+  REPORT_EXPORT: 'report-export',
+  AUDIT_PARTITION: 'audit-partition',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -23,6 +27,10 @@ export const lowStockCheckQueue = createQueue(QUEUE_NAMES.LOW_STOCK_CHECK);
 export const supplierPaymentRemindersQueue = createQueue(QUEUE_NAMES.SUPPLIER_PAYMENT_REMINDERS);
 export const agingInventoryDigestQueue = createQueue(QUEUE_NAMES.AGING_INVENTORY_DIGEST);
 export const dailySalesSummaryQueue = createQueue(QUEUE_NAMES.DAILY_SALES_SUMMARY);
+export const recurringExpensesQueue = createQueue(QUEUE_NAMES.RECURRING_EXPENSES);
+export const poPdfQueue = createQueue(QUEUE_NAMES.PO_PDF);
+export const reportExportQueue = createQueue(QUEUE_NAMES.REPORT_EXPORT);
+export const auditPartitionQueue = createQueue(QUEUE_NAMES.AUDIT_PARTITION);
 
 export const allQueues = [
   heldBillsCleanupQueue,
@@ -30,4 +38,8 @@ export const allQueues = [
   supplierPaymentRemindersQueue,
   agingInventoryDigestQueue,
   dailySalesSummaryQueue,
+  recurringExpensesQueue,
+  poPdfQueue,
+  reportExportQueue,
+  auditPartitionQueue,
 ].filter((q): q is Queue => q !== null);

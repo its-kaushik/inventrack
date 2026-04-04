@@ -432,6 +432,116 @@ export async function getBillById(tenantId: string, billId: string) {
   return { ...bill, items, payments };
 }
 
+// ======================== VOID BILL ========================
+
+export async function voidBill(tenantId: string, userId: string, role: UserRole, billId: string) {
+  return db.transaction(async (tx) => {
+    // 1. Fetch the bill
+    const [bill] = await tx
+      .select()
+      .from(bills)
+      .where(and(eq(bills.id, billId), eq(bills.tenantId, tenantId)))
+      .limit(1);
+
+    if (!bill) throw new NotFoundError('Bill', billId);
+
+    // 2. Validate status
+    if (bill.status === 'voided') {
+      throw new ValidationError('Bill is already voided');
+    }
+    if (bill.status === 'held') {
+      throw new ValidationError('Cannot void a held bill');
+    }
+    if (bill.status !== 'completed' && bill.status !== 'partially_returned') {
+      throw new ValidationError(`Cannot void bill with status "${bill.status}"`);
+    }
+
+    // 3. Update bill status to voided
+    const [updatedBill] = await tx
+      .update(bills)
+      .set({ status: 'voided' })
+      .where(eq(bills.id, billId))
+      .returning();
+
+    // 4. Fetch all bill items
+    const items = await tx.select().from(billItems).where(eq(billItems.billId, billId));
+
+    // 5. Restore stock for unreturned items
+    for (const item of items) {
+      const unreturnedQty = item.quantity - item.returnedQty;
+      if (unreturnedQty <= 0) continue;
+
+      await tx.insert(stockEntries).values({
+        tenantId,
+        productId: item.productId,
+        quantity: unreturnedQty,
+        type: 'adjustment',
+        referenceType: 'void',
+        referenceId: billId,
+        costPriceAtEntry: item.costPrice,
+        reason: 'Bill voided',
+        createdBy: userId,
+      });
+    }
+
+    // 6. Fetch bill payments
+    const payments = await tx.select().from(billPayments).where(eq(billPayments.billId, billId));
+
+    // 7. Reverse credit payment if applicable
+    const creditPayment = payments.find((p) => p.mode === 'credit');
+    if (creditPayment && bill.customerId) {
+      const creditAmount = Number(creditPayment.amount);
+
+      await ledgerService.createEntry(tx, {
+        tenantId,
+        partyType: 'customer',
+        partyId: bill.customerId,
+        entryType: 'adjustment',
+        debit: 0,
+        credit: creditAmount,
+        referenceType: 'void',
+        referenceId: billId,
+        description: `Void reversal for bill ${bill.billNumber}`,
+        createdBy: userId,
+      });
+
+      await ledgerService.updateCustomerBalance(tx, tenantId, bill.customerId, -creditAmount);
+    }
+
+    // 8. Reverse cash register entry if applicable
+    const cashPayment = payments.find((p) => p.mode === 'cash');
+    if (cashPayment) {
+      const cashAmount = Number(cashPayment.amount);
+
+      // Find open register for user
+      const [register] = await tx
+        .select({ id: cashRegisters.id })
+        .from(cashRegisters)
+        .where(
+          and(
+            eq(cashRegisters.tenantId, tenantId),
+            eq(cashRegisters.userId, userId),
+            eq(cashRegisters.status, 'open'),
+          ),
+        )
+        .limit(1);
+
+      if (register) {
+        await tx.insert(cashRegisterEntries).values({
+          registerId: register.id,
+          type: 'petty_expense',
+          amount: String(-cashAmount),
+          referenceType: 'void',
+          referenceId: billId,
+          description: `Void reversal for bill ${bill.billNumber}`,
+        });
+      }
+    }
+
+    return updatedBill;
+  });
+}
+
 export async function getBillForPrint(tenantId: string, billId: string) {
   const bill = await getBillById(tenantId, billId);
 

@@ -14,6 +14,7 @@ purchasesRouter.use('*', authMiddleware, tenantScope, requireRole('owner', 'mana
 
 const createPurchaseSchema = z.object({
   supplierId: z.string().uuid(),
+  poId: z.string().uuid().optional(),
   invoiceNumber: z.string().max(50).optional(),
   invoiceDate: z.string().optional(),
   invoiceImageUrl: z.string().url().optional(),
@@ -22,13 +23,17 @@ const createPurchaseSchema = z.object({
   sgstAmount: z.number().min(0).optional(),
   igstAmount: z.number().min(0).optional(),
   isRcm: z.boolean().optional(),
-  items: z.array(z.object({
-    productId: z.string().uuid(),
-    quantity: z.number().int().positive(),
-    costPrice: z.number().positive(),
-    gstRate: z.number().min(0).optional(),
-    gstAmount: z.number().min(0).optional(),
-  })).min(1),
+  items: z
+    .array(
+      z.object({
+        productId: z.string().uuid(),
+        quantity: z.number().int().positive(),
+        costPrice: z.number().positive(),
+        gstRate: z.number().min(0).optional(),
+        gstAmount: z.number().min(0).optional(),
+      }),
+    )
+    .min(1),
 });
 
 purchasesRouter.post('/', validate(createPurchaseSchema), async (c) => {

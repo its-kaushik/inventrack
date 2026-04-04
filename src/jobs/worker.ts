@@ -7,6 +7,10 @@ import processLowStockCheck from './processors/low-stock-check.js';
 import processSupplierPaymentReminders from './processors/supplier-payment-reminders.js';
 import processAgingInventory from './processors/aging-inventory.js';
 import processDailySalesSummary from './processors/daily-sales-summary.js';
+import processRecurringExpenses from './processors/recurring-expenses.js';
+import processPoPdf from './processors/po-pdf.js';
+import processReportExport from './processors/report-export.js';
+import processAuditPartition from './processors/audit-partition.js';
 
 const workers: Worker[] = [];
 
@@ -20,6 +24,10 @@ export function startWorkers() {
     { name: QUEUE_NAMES.SUPPLIER_PAYMENT_REMINDERS, processor: processSupplierPaymentReminders },
     { name: QUEUE_NAMES.AGING_INVENTORY_DIGEST, processor: processAgingInventory },
     { name: QUEUE_NAMES.DAILY_SALES_SUMMARY, processor: processDailySalesSummary },
+    { name: QUEUE_NAMES.RECURRING_EXPENSES, processor: processRecurringExpenses },
+    { name: QUEUE_NAMES.PO_PDF, processor: processPoPdf },
+    { name: QUEUE_NAMES.REPORT_EXPORT, processor: processReportExport },
+    { name: QUEUE_NAMES.AUDIT_PARTITION, processor: processAuditPartition },
   ];
 
   for (const { name, processor } of workerDefs) {

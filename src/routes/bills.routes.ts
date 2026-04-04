@@ -5,6 +5,7 @@ import * as syncService from '../services/sync.service.js';
 import * as heldBillService from '../services/held-bill.service.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { tenantScope } from '../middleware/tenant-scope.js';
+import { requireRole } from '../middleware/rbac.js';
 import { validate } from '../middleware/validate.js';
 import { success, paginated } from '../lib/response.js';
 import type { AppEnv } from '../types/hono.js';
@@ -120,6 +121,15 @@ billsRouter.delete('/held/:id', async (c) => {
   const billId = c.req.param('id')!;
   await heldBillService.discardHeldBill(tenantId, billId);
   return c.json(success({ deleted: true }));
+});
+
+// ======================== VOID BILL ENDPOINT ========================
+
+billsRouter.post('/:id/void', requireRole('owner'), async (c) => {
+  const { tenantId, userId, role } = c.get('tenant');
+  const id = c.req.param('id')!;
+  const bill = await billingService.voidBill(tenantId, userId, role, id);
+  return c.json(success(bill));
 });
 
 // ======================== STANDARD BILL ENDPOINTS ========================

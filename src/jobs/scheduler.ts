@@ -5,6 +5,8 @@ import {
   supplierPaymentRemindersQueue,
   agingInventoryDigestQueue,
   dailySalesSummaryQueue,
+  recurringExpensesQueue,
+  auditPartitionQueue,
 } from './queues.js';
 
 export async function registerSchedules() {
@@ -18,6 +20,8 @@ export async function registerSchedules() {
     },
     { queue: agingInventoryDigestQueue, name: 'aging-inventory-digest', pattern: '0 8 * * 1' },
     { queue: dailySalesSummaryQueue, name: 'daily-sales-summary', pattern: '0 21 * * *' },
+    { queue: recurringExpensesQueue, name: 'recurring-expenses', pattern: '0 6 * * *' },
+    { queue: auditPartitionQueue, name: 'audit-partition', pattern: '0 0 25 * *' },
   ];
 
   for (const { queue, name, pattern } of schedules) {
