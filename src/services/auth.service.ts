@@ -4,10 +4,12 @@ import bcrypt from 'bcryptjs';
 import { randomUUID, createHash } from 'crypto';
 import { db } from '../config/database.js';
 import { env } from '../config/env.js';
+import { redis } from '../config/redis.js';
 import { users } from '../db/schema/users.js';
 import { tenants } from '../db/schema/tenants.js';
 import { refreshTokens } from '../db/schema/refresh-tokens.js';
-import { AuthError } from '../lib/errors.js';
+import { AuthError, ValidationError, RateLimitError } from '../lib/errors.js';
+import { logger } from '../lib/logger.js';
 
 const jwtSecret = new TextEncoder().encode(env.JWT_SECRET);
 
@@ -15,7 +17,11 @@ function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
-async function generateAccessToken(userId: string, tenantId: string, role: string): Promise<string> {
+async function generateAccessToken(
+  userId: string,
+  tenantId: string,
+  role: string,
+): Promise<string> {
   return new SignJWT({ sub: userId, tid: tenantId, role })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
@@ -173,4 +179,99 @@ export async function getMe(userId: string, tenantId: string) {
     .limit(1);
 
   return { ...user, tenant };
+}
+
+// ======================== OTP LOGIN ========================
+
+export async function sendOtp(phone: string) {
+  if (!redis) throw new ValidationError('OTP login requires Redis to be configured');
+
+  // Rate limit: 3 OTP requests per 10 minutes per phone
+  const rateLimitKey = `otp:ratelimit:${phone}`;
+  const attempts = await redis.incr(rateLimitKey);
+  if (attempts === 1) await redis.expire(rateLimitKey, 600);
+  if (attempts > 3) throw new RateLimitError();
+
+  // Verify user exists
+  const [user] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.phone, phone))
+    .limit(1);
+
+  if (!user) {
+    // Don't reveal whether phone exists — return success anyway
+    return { message: 'If this phone number is registered, an OTP has been sent.' };
+  }
+
+  // Generate 6-digit OTP
+  const otp = String(Math.floor(100000 + Math.random() * 900000));
+  const otpKey = `otp:${phone}`;
+  await redis.setex(otpKey, 300, otp); // 5-minute TTL
+
+  // In production: send via SMS gateway. For now, log it.
+  logger.info({ phone, otp }, 'OTP generated (dev mode — would be sent via SMS in production)');
+
+  return { message: 'If this phone number is registered, an OTP has been sent.' };
+}
+
+export async function verifyOtp(phone: string, otp: string) {
+  if (!redis) throw new ValidationError('OTP login requires Redis to be configured');
+
+  const otpKey = `otp:${phone}`;
+  const stored = await redis.get(otpKey);
+
+  if (!stored || stored !== otp) {
+    throw new AuthError('Invalid or expired OTP');
+  }
+
+  // OTP is valid — delete it
+  await redis.del(otpKey);
+
+  // Look up user and proceed with login (same as password login but without password check)
+  const [user] = await db
+    .select({
+      id: users.id,
+      tenantId: users.tenantId,
+      name: users.name,
+      phone: users.phone,
+      email: users.email,
+      role: users.role,
+      isActive: users.isActive,
+    })
+    .from(users)
+    .where(eq(users.phone, phone))
+    .limit(1);
+
+  if (!user) throw new AuthError('User not found');
+  if (!user.isActive) throw new AuthError('Your account has been deactivated');
+
+  const [tenant] = await db
+    .select({ status: tenants.status, setupComplete: tenants.setupComplete })
+    .from(tenants)
+    .where(eq(tenants.id, user.tenantId))
+    .limit(1);
+
+  if (!tenant || tenant.status !== 'active') {
+    throw new AuthError('Your store account is not active');
+  }
+
+  const accessToken = await generateAccessToken(user.id, user.tenantId, user.role);
+  const rawRefreshToken = await createRefreshToken(user.id);
+
+  await db.update(users).set({ lastLoginAt: new Date() }).where(eq(users.id, user.id));
+
+  return {
+    accessToken,
+    refreshToken: rawRefreshToken,
+    user: {
+      id: user.id,
+      tenantId: user.tenantId,
+      name: user.name,
+      phone: user.phone,
+      email: user.email,
+      role: user.role,
+      setupComplete: tenant.setupComplete,
+    },
+  };
 }

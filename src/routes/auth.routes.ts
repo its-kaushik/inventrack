@@ -29,17 +29,26 @@ auth.post('/login', loginRateLimit, validate(loginSchema), async (c) => {
     maxAge: env.JWT_REFRESH_TTL,
   });
 
-  return c.json(success({
-    accessToken: result.accessToken,
-    user: result.user,
-  }));
+  return c.json(
+    success({
+      accessToken: result.accessToken,
+      user: result.user,
+    }),
+  );
 });
 
 auth.post('/refresh', async (c) => {
   const rawToken = getCookie(c, 'refreshToken');
 
   if (!rawToken) {
-    return c.json({ success: false, data: null, error: { code: 'UNAUTHORIZED', message: 'No refresh token', details: null } }, 401);
+    return c.json(
+      {
+        success: false,
+        data: null,
+        error: { code: 'UNAUTHORIZED', message: 'No refresh token', details: null },
+      },
+      401,
+    );
   }
 
   const result = await authService.refresh(rawToken);
@@ -69,13 +78,61 @@ auth.post('/forgot-password', validate(z.object({ phone: z.string().min(1) })), 
   return c.json(success({ message: 'If this phone number exists, a reset link has been sent.' }));
 });
 
-auth.post('/reset-password', validate(z.object({
-  token: z.string().min(1),
-  newPassword: z.string().min(6, 'Password must be at least 6 characters'),
-})), async (c) => {
-  // Phase 1: placeholder — real reset token validation comes later
-  return c.json(success({ message: 'Password reset functionality coming soon.' }));
-});
+auth.post(
+  '/reset-password',
+  validate(
+    z.object({
+      token: z.string().min(1),
+      newPassword: z.string().min(6, 'Password must be at least 6 characters'),
+    }),
+  ),
+  async (c) => {
+    // Phase 1: placeholder — real reset token validation comes later
+    return c.json(success({ message: 'Password reset functionality coming soon.' }));
+  },
+);
+
+// OTP Login (Phase 3)
+auth.post(
+  '/send-otp',
+  loginRateLimit,
+  validate(z.object({ phone: z.string().min(10) })),
+  async (c) => {
+    const { phone } = c.get('validatedBody') as { phone: string };
+    const result = await authService.sendOtp(phone);
+    return c.json(success(result));
+  },
+);
+
+auth.post(
+  '/verify-otp',
+  loginRateLimit,
+  validate(
+    z.object({
+      phone: z.string().min(10),
+      otp: z.string().length(6),
+    }),
+  ),
+  async (c) => {
+    const { phone, otp } = c.get('validatedBody') as { phone: string; otp: string };
+    const result = await authService.verifyOtp(phone, otp);
+
+    setCookie(c, 'refreshToken', result.refreshToken, {
+      httpOnly: true,
+      secure: env.NODE_ENV === 'production',
+      sameSite: 'Strict',
+      path: '/api/v1/auth',
+      maxAge: env.JWT_REFRESH_TTL,
+    });
+
+    return c.json(
+      success({
+        accessToken: result.accessToken,
+        user: result.user,
+      }),
+    );
+  },
+);
 
 auth.get('/me', authMiddleware, async (c) => {
   const { userId, tenantId } = c.get('tenant');
