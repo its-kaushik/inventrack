@@ -2,6 +2,7 @@ import { serve } from '@hono/node-server';
 import app from './index.js';
 import { env } from './config/env.js';
 import { logger } from './lib/logger.js';
+import { initJobs } from './jobs/index.js';
 
 const server = serve(
   {
@@ -10,6 +11,7 @@ const server = serve(
   },
   (info) => {
     logger.info({ port: info.port }, `InvenTrack API running on http://localhost:${info.port}`);
+    initJobs();
   },
 );
 

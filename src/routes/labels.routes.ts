@@ -2,8 +2,10 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import * as productService from '../services/product.service.js';
 import * as barcodeService from '../services/barcode.service.js';
+import * as labelTemplateService from '../services/label-template.service.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { tenantScope } from '../middleware/tenant-scope.js';
+import { requireRole } from '../middleware/rbac.js';
 import { validate } from '../middleware/validate.js';
 import { success } from '../lib/response.js';
 import { formatINR } from '../lib/indian-format.js';
@@ -69,29 +71,51 @@ labelsRouter.post('/generate', validate(generateLabelsSchema), async (c) => {
 });
 
 labelsRouter.get('/templates', async (c) => {
-  return c.json(
-    success([
-      {
-        id: 'default',
-        name: 'Standard Label (A4 3x10)',
-        description: 'Barcode + Name + Size + Price on A4 sheet',
-        fields: ['barcode', 'name', 'size', 'price', 'sku'],
-      },
-      {
-        id: 'minimal',
-        name: 'Minimal Label',
-        description: 'Barcode + Price only',
-        fields: ['barcode', 'price'],
-      },
-      {
-        id: 'thermal',
-        name: 'Thermal (50x25mm)',
-        description: 'Single label for thermal printer',
-        fields: ['barcode', 'name', 'size', 'price'],
-      },
-    ]),
-  );
+  const { tenantId } = c.get('tenant');
+  const templates = await labelTemplateService.listTemplates(tenantId);
+  return c.json(success(templates));
 });
+
+const createTemplateSchema = z.object({
+  name: z.string().min(1).max(100),
+  description: z.string().max(255).optional(),
+  fields: z.array(z.string()).min(1),
+  layout: z.record(z.string(), z.unknown()).optional(),
+});
+
+labelsRouter.post(
+  '/templates',
+  requireRole('owner', 'manager'),
+  validate(createTemplateSchema),
+  async (c) => {
+    const { tenantId } = c.get('tenant');
+    const input = c.get('validatedBody') as z.infer<typeof createTemplateSchema>;
+    const template = await labelTemplateService.createTemplate(tenantId, input);
+    return c.json(success(template), 201);
+  },
+);
+
+const updateTemplateSchema = z
+  .object({
+    name: z.string().min(1).max(100).optional(),
+    description: z.string().max(255).optional(),
+    fields: z.array(z.string()).min(1).optional(),
+    layout: z.record(z.string(), z.unknown()).optional(),
+  })
+  .refine((d) => Object.keys(d).length > 0, { message: 'At least one field required' });
+
+labelsRouter.put(
+  '/templates/:id',
+  requireRole('owner', 'manager'),
+  validate(updateTemplateSchema),
+  async (c) => {
+    const { tenantId } = c.get('tenant');
+    const id = c.req.param('id')!;
+    const patch = c.get('validatedBody') as z.infer<typeof updateTemplateSchema>;
+    const template = await labelTemplateService.updateTemplate(tenantId, id, patch);
+    return c.json(success(template));
+  },
+);
 
 function generateLabelSheetHtml(
   labels: Array<{

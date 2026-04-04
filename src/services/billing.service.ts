@@ -22,6 +22,8 @@ interface CreateBillInput {
   additionalDiscountPct?: number;
   clientId?: string;
   notes?: string;
+  isOffline?: boolean;
+  offlineCreatedAt?: string;
 }
 
 interface ComputedLineItem {
@@ -342,6 +344,8 @@ async function _createBillTransaction(
       netAmount: String(toDbDecimal(totals.netAmount)),
       gstSchemeAtSale: tenant.gstScheme,
       status: 'completed',
+      isOffline: input.isOffline ?? false,
+      offlineCreatedAt: input.offlineCreatedAt ?? null,
       clientId: input.clientId || null,
       notes: input.notes,
     });

@@ -53,3 +53,14 @@ export class RateLimitError extends AppError {
     this.name = 'RateLimitError';
   }
 }
+
+export class ReturnWindowExpiredError extends AppError {
+  constructor() {
+    super(
+      422,
+      'RETURN_WINDOW_EXPIRED',
+      'Return attempted outside the allowed return window. Owner or manager approval required.',
+    );
+    this.name = 'ReturnWindowExpiredError';
+  }
+}
