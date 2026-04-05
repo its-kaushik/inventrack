@@ -82,9 +82,112 @@ reportRoutes.get('/purchase-summary', async (c) => {
   return c.json({ data: result });
 });
 
-// Remaining Phase 3 report endpoints to be added:
-// GET /reports/sales-summary, sales-by-category, sales-by-product, sales-by-brand, sales-trend
-// GET /reports/profit-margins, pnl, discount-impact
-// GET /reports/purchase-vs-sales, stock-movement
-// GET /reports/customer-outstanding, supplier-outstanding, credit-aging, payment-collections
-// GET /reports/staff-activity, gst-summary, hsn-summary, expense-summary
+// ── Sales Reports (M18b) ──
+
+const withDateRange = (c: any) => ({ from: c.req.query('from'), to: c.req.query('to') });
+
+reportRoutes.get('/sales-summary', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  return c.json({ data: await reportService.getSalesSummary(auth.tenantId, withDateRange(c)) });
+});
+
+reportRoutes.get('/sales-by-category', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  return c.json({ data: await reportService.getSalesByCategory(auth.tenantId, withDateRange(c)) });
+});
+
+reportRoutes.get('/sales-by-product', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  return c.json({ data: await reportService.getSalesByProduct(auth.tenantId, withDateRange(c)) });
+});
+
+reportRoutes.get('/sales-by-brand', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  return c.json({ data: await reportService.getSalesByBrand(auth.tenantId, withDateRange(c)) });
+});
+
+reportRoutes.get('/sales-trend', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  return c.json({ data: await reportService.getSalesTrend(auth.tenantId, withDateRange(c)) });
+});
+
+// ── Profit Reports ──
+
+reportRoutes.get('/profit-margins', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  return c.json({ data: await reportService.getProfitMargins(auth.tenantId, withDateRange(c)) });
+});
+
+reportRoutes.get('/pnl', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  return c.json({ data: await reportService.getPnl(auth.tenantId, withDateRange(c)) });
+});
+
+reportRoutes.get('/discount-impact', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  return c.json({ data: await reportService.getDiscountImpact(auth.tenantId, withDateRange(c)) });
+});
+
+// ── Credit Reports ──
+
+reportRoutes.get('/customer-outstanding', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  return c.json({ data: await reportService.getCustomerOutstanding(auth.tenantId) });
+});
+
+reportRoutes.get('/supplier-outstanding', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  return c.json({ data: await reportService.getSupplierOutstanding(auth.tenantId) });
+});
+
+reportRoutes.get('/credit-aging', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  return c.json({ data: await reportService.getCreditAging(auth.tenantId) });
+});
+
+reportRoutes.get('/payment-collections', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  return c.json({ data: await reportService.getPaymentCollections(auth.tenantId, withDateRange(c)) });
+});
+
+// ── Staff Reports ──
+
+reportRoutes.get('/staff-activity', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  return c.json({ data: await reportService.getStaffActivity(auth.tenantId, withDateRange(c)) });
+});
+
+// ── Expense Reports ──
+
+reportRoutes.get('/expense-summary', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  return c.json({ data: await reportService.getExpenseSummary(auth.tenantId, withDateRange(c)) });
+});
+
+// ── GST Reports ──
+
+reportRoutes.get('/gst-summary', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  return c.json({ data: await reportService.getGstSummary(auth.tenantId, withDateRange(c)) });
+});
+
+reportRoutes.get('/hsn-summary', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  return c.json({ data: await reportService.getHsnSummary(auth.tenantId, withDateRange(c)) });
+});
