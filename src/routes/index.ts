@@ -8,6 +8,7 @@ import { inventoryRoutes } from './inventory.routes.js';
 import { supplierRoutes } from './suppliers.routes.js';
 import { goodsReceiptRoutes } from './goods-receipts.routes.js';
 import { customerRoutes } from './customers.routes.js';
+import { salesRoutes } from './sales.routes.js';
 import type { AppEnv } from '../types/hono.js';
 
 export const routes = new Hono<AppEnv>();
@@ -21,3 +22,4 @@ routes.route('/inventory', inventoryRoutes);
 routes.route('/suppliers', supplierRoutes);
 routes.route('/goods-receipts', goodsReceiptRoutes);
 routes.route('/customers', customerRoutes);
+routes.route('/sales', salesRoutes);

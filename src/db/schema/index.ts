@@ -6,3 +6,4 @@ export * from './products.js';
 export * from './suppliers.js';
 export * from './purchases.js';
 export * from './customers.js';
+export * from './sales.js';
