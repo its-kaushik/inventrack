@@ -29,6 +29,13 @@
       "when": 1775409666504,
       "tag": "0003_demonic_paladin",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1775410388282,
+      "tag": "0004_curly_azazel",
+      "breakpoints": true
     }
   ]
 }
