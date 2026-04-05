@@ -11,6 +11,7 @@ import { customerRoutes } from './customers.routes.js';
 import { salesRoutes } from './sales.routes.js';
 import { syncRoutes } from './sync.routes.js';
 import { labelRoutes } from './labels.routes.js';
+import { creditRoutes } from './credit.routes.js';
 import type { AppEnv } from '../types/hono.js';
 
 export const routes = new Hono<AppEnv>();
@@ -27,3 +28,4 @@ routes.route('/customers', customerRoutes);
 routes.route('/sales', salesRoutes);
 routes.route('/sync', syncRoutes);
 routes.route('/labels', labelRoutes);
+routes.route('/credit', creditRoutes);
