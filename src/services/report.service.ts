@@ -1,7 +1,7 @@
-import { eq, and, sql, gt, isNull } from 'drizzle-orm';
+import { eq, and, sql, gt, isNull, asc, desc, count } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { sales, saleItems } from '../db/schema/sales.js';
-import { productVariants, products } from '../db/schema/products.js';
+import { productVariants, products, inventoryMovements } from '../db/schema/products.js';
 import { customers } from '../db/schema/customers.js';
 import { suppliers } from '../db/schema/suppliers.js';
 import { syncConflicts } from '../db/schema/sync.js';
@@ -174,4 +174,169 @@ export async function getDashboard(tenantId: string) {
       unresolvedConflicts: Number((conflictCount as any).count ?? 0),
     },
   };
+}
+
+// ──────────────── Inventory Reports (M14) ────────────────
+
+export async function getCurrentStock(
+  tenantId: string,
+  opts?: { page?: number; limit?: number },
+) {
+  const page = opts?.page ?? 1;
+  const limit = opts?.limit ?? 50;
+  const offset = (page - 1) * limit;
+
+  const data = await db
+    .select({
+      variantId: productVariants.id,
+      productId: productVariants.productId,
+      productName: products.name,
+      sku: productVariants.sku,
+      barcode: productVariants.barcode,
+      availableQuantity: productVariants.availableQuantity,
+      reservedQuantity: productVariants.reservedQuantity,
+      weightedAvgCost: productVariants.weightedAvgCost,
+      mrp: productVariants.mrp,
+      lowStockThreshold: productVariants.lowStockThreshold,
+    })
+    .from(productVariants)
+    .innerJoin(products, eq(productVariants.productId, products.id))
+    .where(
+      and(
+        eq(productVariants.tenantId, tenantId),
+        eq(productVariants.isActive, true),
+        isNull(products.deletedAt),
+        eq(products.isArchived, false),
+      ),
+    )
+    .orderBy(asc(products.name), asc(productVariants.sku))
+    .limit(limit)
+    .offset(offset);
+
+  const [totalResult] = await db
+    .select({ total: count() })
+    .from(productVariants)
+    .innerJoin(products, eq(productVariants.productId, products.id))
+    .where(
+      and(
+        eq(productVariants.tenantId, tenantId),
+        eq(productVariants.isActive, true),
+        isNull(products.deletedAt),
+        eq(products.isArchived, false),
+      ),
+    );
+
+  // Add computed values
+  const enriched = data.map((row) => ({
+    ...row,
+    stockValueAtCost: Number(row.weightedAvgCost) * row.availableQuantity,
+    stockValueAtMrp: Number(row.mrp) * row.availableQuantity,
+  }));
+
+  return { data: enriched, total: totalResult?.total ?? 0, page, limit };
+}
+
+export async function getInventoryValuation(tenantId: string) {
+  const [result] = await db.execute(sql`
+    SELECT
+      COUNT(pv.id)::int as total_variants,
+      COALESCE(SUM(pv.available_quantity), 0)::int as total_units,
+      COALESCE(SUM(pv.available_quantity * pv.weighted_avg_cost::numeric), 0) as value_at_cost,
+      COALESCE(SUM(pv.available_quantity * pv.mrp::numeric), 0) as value_at_mrp
+    FROM product_variants pv
+    INNER JOIN products p ON pv.product_id = p.id
+    WHERE pv.tenant_id = ${tenantId}
+      AND pv.is_active = true
+      AND p.deleted_at IS NULL
+      AND p.is_archived = false
+      AND pv.available_quantity > 0
+  `);
+
+  return {
+    totalVariants: Number((result as any)?.total_variants ?? 0),
+    totalUnits: Number((result as any)?.total_units ?? 0),
+    valueAtCost: Number((result as any)?.value_at_cost ?? 0),
+    valueAtMrp: Number((result as any)?.value_at_mrp ?? 0),
+  };
+}
+
+export async function getDeadStock(tenantId: string, thresholdDaysOverride?: number) {
+  const [settings] = await db
+    .select({ threshold: tenantSettings.shelfAgingThresholdDays })
+    .from(tenantSettings)
+    .where(eq(tenantSettings.tenantId, tenantId));
+  const thresholdDays = thresholdDaysOverride ?? settings?.threshold ?? 90;
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - thresholdDays);
+
+  const data = await db.execute(sql`
+    SELECT
+      pv.id as variant_id,
+      pv.product_id,
+      pv.sku,
+      pv.available_quantity,
+      pv.weighted_avg_cost,
+      pv.mrp,
+      p.name as product_name,
+      MIN(im.created_at) as oldest_stock_date,
+      EXTRACT(DAY FROM NOW() - MIN(im.created_at))::int as age_days,
+      (pv.available_quantity * pv.weighted_avg_cost::numeric) as capital_locked
+    FROM product_variants pv
+    INNER JOIN products p ON pv.product_id = p.id
+    INNER JOIN inventory_movements im ON im.variant_id = pv.id
+      AND im.movement_type IN ('purchase', 'opening_balance')
+    WHERE pv.tenant_id = ${tenantId}
+      AND pv.is_active = true
+      AND pv.available_quantity > 0
+      AND p.deleted_at IS NULL
+      AND p.is_archived = false
+    GROUP BY pv.id, pv.product_id, pv.sku, pv.available_quantity, pv.weighted_avg_cost, pv.mrp, p.name
+    HAVING MIN(im.created_at) < ${cutoff.toISOString()}::timestamptz
+    ORDER BY MIN(im.created_at) ASC
+  `);
+
+  return {
+    thresholdDays,
+    items: (data as any[]).map((r: any) => ({
+      variantId: r.variant_id,
+      productId: r.product_id,
+      productName: r.product_name,
+      sku: r.sku,
+      availableQuantity: Number(r.available_quantity),
+      weightedAvgCost: Number(r.weighted_avg_cost),
+      mrp: Number(r.mrp),
+      ageDays: Number(r.age_days),
+      capitalLocked: Number(r.capital_locked),
+      oldestStockDate: r.oldest_stock_date,
+    })),
+  };
+}
+
+export async function getLowStockReport(tenantId: string) {
+  const data = await db
+    .select({
+      variantId: productVariants.id,
+      productId: productVariants.productId,
+      productName: products.name,
+      sku: productVariants.sku,
+      availableQuantity: productVariants.availableQuantity,
+      lowStockThreshold: productVariants.lowStockThreshold,
+      mrp: productVariants.mrp,
+      weightedAvgCost: productVariants.weightedAvgCost,
+    })
+    .from(productVariants)
+    .innerJoin(products, eq(productVariants.productId, products.id))
+    .where(
+      and(
+        eq(productVariants.tenantId, tenantId),
+        eq(productVariants.isActive, true),
+        sql`${productVariants.lowStockThreshold} IS NOT NULL`,
+        sql`${productVariants.availableQuantity} <= ${productVariants.lowStockThreshold}`,
+        isNull(products.deletedAt),
+        eq(products.isArchived, false),
+      ),
+    )
+    .orderBy(asc(productVariants.availableQuantity));
+
+  return { data, count: data.length };
 }

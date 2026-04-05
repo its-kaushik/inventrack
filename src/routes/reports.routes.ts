@@ -17,28 +17,50 @@ reportRoutes.get('/dashboard', async (c) => {
   return c.json({ data: dashboard });
 });
 
-// Phase 3 report endpoints will be added here:
-// GET /reports/sales-summary
-// GET /reports/sales-by-category
-// GET /reports/sales-by-product
-// GET /reports/sales-by-brand
-// GET /reports/sales-trend
-// GET /reports/profit-margins
-// GET /reports/pnl
-// GET /reports/discount-impact
+// ── Inventory Reports (M14) ──
+
 // GET /reports/current-stock
+reportRoutes.get('/current-stock', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const query = c.req.query();
+  const result = await reportService.getCurrentStock(auth.tenantId, {
+    page: query.page ? Number(query.page) : 1,
+    limit: query.limit ? Number(query.limit) : 50,
+  });
+  return c.json({
+    data: result.data,
+    meta: { total: result.total, page: result.page, limit: result.limit },
+  });
+});
+
 // GET /reports/inventory-valuation
+reportRoutes.get('/inventory-valuation', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const valuation = await reportService.getInventoryValuation(auth.tenantId);
+  return c.json({ data: valuation });
+});
+
 // GET /reports/dead-stock
+reportRoutes.get('/dead-stock', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const result = await reportService.getDeadStock(auth.tenantId);
+  return c.json({ data: result });
+});
+
 // GET /reports/low-stock
-// GET /reports/supplier-purchases
-// GET /reports/purchase-summary
-// GET /reports/purchase-vs-sales
-// GET /reports/stock-movement
-// GET /reports/customer-outstanding
-// GET /reports/supplier-outstanding
-// GET /reports/credit-aging
-// GET /reports/payment-collections
-// GET /reports/staff-activity
-// GET /reports/gst-summary
-// GET /reports/hsn-summary
-// GET /reports/expense-summary
+reportRoutes.get('/low-stock', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const result = await reportService.getLowStockReport(auth.tenantId);
+  return c.json({ data: result });
+});
+
+// Remaining Phase 3 report endpoints to be added:
+// GET /reports/sales-summary, sales-by-category, sales-by-product, sales-by-brand, sales-trend
+// GET /reports/profit-margins, pnl, discount-impact
+// GET /reports/supplier-purchases, purchase-summary, purchase-vs-sales, stock-movement
+// GET /reports/customer-outstanding, supplier-outstanding, credit-aging, payment-collections
+// GET /reports/staff-activity, gst-summary, hsn-summary, expense-summary
