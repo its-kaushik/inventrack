@@ -20,6 +20,11 @@ export async function startWorker(): Promise<PgBoss> {
     await handleResizeProductImage(job.data as any);
   });
 
+  const { handleCheckLowStock } = await import('./check-low-stock.js');
+  await boss.work('check-low-stock', async ([job]) => {
+    await handleCheckLowStock(job.data as any);
+  });
+
   console.info('[pg-boss] Worker started');
   return boss;
 }

@@ -4,6 +4,7 @@ import { userRoutes } from './users.routes.js';
 import { adminRoutes } from './admin.routes.js';
 import { settingsRoutes } from './settings.routes.js';
 import { productRoutes } from './products.routes.js';
+import { inventoryRoutes } from './inventory.routes.js';
 import type { AppEnv } from '../types/hono.js';
 
 export const routes = new Hono<AppEnv>();
@@ -13,3 +14,4 @@ routes.route('/users', userRoutes);
 routes.route('/admin', adminRoutes);
 routes.route('/settings', settingsRoutes);
 routes.route('/products', productRoutes);
+routes.route('/inventory', inventoryRoutes);
