@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { validate, uuidParam } from '../validators/common.validators.js';
-import { createSaleSchema, parkBillSchema, saleListQuerySchema } from '../validators/sales.validators.js';
+import { createSaleSchema, voidSaleSchema, parkBillSchema, saleListQuerySchema } from '../validators/sales.validators.js';
 import * as salesService from '../services/sales.service.js';
 import { authorize } from '../middleware/rbac.js';
 import { AppError } from '../types/errors.js';
@@ -69,7 +69,17 @@ salesRoutes.delete('/parked/:id', async (c) => {
   return c.json({ data: { message: 'Parked bill deleted' } });
 });
 
-// ── Parameterized route AFTER specific routes ──
+// ── Parameterized routes AFTER specific routes ──
+
+// POST /sales/:id/void — void a bill (requires Owner PIN approval)
+salesRoutes.post('/:id/void', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  const body = validate(voidSaleSchema, await c.req.json());
+  const voided = await salesService.voidSale(auth, id, body);
+  return c.json({ data: voided });
+});
 
 // GET /sales/:id — bill detail
 salesRoutes.get('/:id', async (c) => {

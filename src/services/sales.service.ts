@@ -8,7 +8,7 @@ import { calculateDiscount } from '../lib/discount-engine.js';
 import { calculateGst } from '../lib/gst-calculator.js';
 import { roundToRupee, calculateRoundOff } from '../lib/currency.js';
 import { generateBillNumber } from '../lib/bill-number.js';
-import { decrementStock } from '../lib/stock-manager.js';
+import { decrementStock, incrementStock } from '../lib/stock-manager.js';
 import { verifyApprovalToken } from './auth.service.js';
 import { AppError } from '../types/errors.js';
 import { AuditRepository } from '../repositories/audit.repository.js';
@@ -370,4 +370,155 @@ export async function deleteParkedBill(tenantId: string, parkedBillId: string) {
     .returning({ id: parkedBills.id });
 
   if (!deleted) throw new AppError('NOT_FOUND', 'Parked bill not found', 404);
+}
+
+// ──────────────── Void Sale ────────────────
+
+export async function voidSale(
+  auth: AuthContext,
+  saleId: string,
+  data: { reason: string; approvalToken: string },
+) {
+  const tenantId = auth.tenantId!;
+
+  // 1. Verify approval token (Owner PIN required)
+  await verifyApprovalToken(data.approvalToken, tenantId);
+
+  return db.transaction(async (tx) => {
+    // 2. Fetch the sale
+    const [sale] = await tx
+      .select()
+      .from(sales)
+      .where(and(eq(sales.id, saleId), eq(sales.tenantId, tenantId)));
+
+    if (!sale) throw new AppError('NOT_FOUND', 'Sale not found', 404);
+
+    if (sale.status !== 'completed') {
+      throw new AppError('CONFLICT', `Cannot void a sale with status '${sale.status}'`, 409);
+    }
+
+    // 3. Verify void window
+    const [settings] = await tx
+      .select({ voidWindowHours: tenantSettings.voidWindowHours })
+      .from(tenantSettings)
+      .where(eq(tenantSettings.tenantId, tenantId));
+
+    const voidWindowMs = (settings?.voidWindowHours ?? 24) * 60 * 60 * 1000;
+    const saleAge = Date.now() - new Date(sale.createdAt).getTime();
+
+    if (saleAge > voidWindowMs) {
+      throw new AppError(
+        'BILL_OUTSIDE_VOID_WINDOW',
+        `Bill is older than ${settings?.voidWindowHours ?? 24} hours. Use returns/credit notes instead.`,
+        422,
+      );
+    }
+
+    // 4. Fetch sale items
+    const items = await tx.select().from(saleItems).where(eq(saleItems.saleId, saleId));
+
+    // 5. Reverse stock decrements (increment back)
+    for (const item of items) {
+      if (!item.variantId) continue;
+
+      const [variant] = await tx
+        .select({ version: productVariants.version })
+        .from(productVariants)
+        .where(eq(productVariants.id, item.variantId));
+
+      if (!variant) continue;
+
+      const updated = await incrementStock(tx, tenantId, item.variantId, item.quantity, variant.version);
+
+      // Create reverse inventory movement
+      await tx.insert(inventoryMovements).values({
+        tenantId,
+        variantId: item.variantId,
+        movementType: 'sale_return',
+        quantity: item.quantity,
+        referenceType: 'void',
+        referenceId: saleId,
+        costPriceAtMovement: item.costAtSale,
+        balanceAfter: updated.availableQuantity,
+        notes: `Bill void: ${data.reason}`,
+        createdBy: auth.userId,
+      });
+    }
+
+    // 6. Reverse customer credit entries (if credit payment was used)
+    const payments = await tx.select().from(salePayments).where(eq(salePayments.saleId, saleId));
+    const creditPayment = payments.find((p) => p.paymentMethod === 'credit');
+
+    if (creditPayment) {
+      const creditAmount = Number(creditPayment.amount);
+      const [customer] = await tx
+        .select({ outstandingBalance: customers.outstandingBalance })
+        .from(customers)
+        .where(eq(customers.id, sale.customerId));
+
+      if (customer) {
+        const currentBalance = Number(customer.outstandingBalance);
+        const newBalance = currentBalance - creditAmount;
+
+        await tx
+          .update(customers)
+          .set({ outstandingBalance: String(newBalance), updatedAt: new Date() })
+          .where(eq(customers.id, sale.customerId));
+
+        await tx.insert(customerTransactions).values({
+          tenantId,
+          customerId: sale.customerId,
+          type: 'return_adjustment',
+          amount: String(-creditAmount), // Negative = they owe less
+          balanceAfter: String(newBalance),
+          referenceType: 'void',
+          referenceId: saleId,
+          notes: `Bill void: ${data.reason}`,
+          createdBy: auth.userId,
+        });
+      }
+    }
+
+    // 7. Reverse customer stats
+    const netPayable = Number(sale.netPayable);
+    await tx
+      .update(customers)
+      .set({
+        totalSpend: sql`GREATEST(${customers.totalSpend}::numeric - ${netPayable}, 0)`,
+        visitCount: sql`GREATEST(${customers.visitCount} - 1, 0)`,
+        updatedAt: new Date(),
+      })
+      .where(eq(customers.id, sale.customerId));
+
+    // 8. Mark sale as cancelled
+    const [voided] = await tx
+      .update(sales)
+      .set({
+        status: 'cancelled',
+        voidReason: data.reason,
+        voidedAt: new Date(),
+        voidedBy: auth.userId,
+        updatedAt: new Date(),
+      })
+      .where(eq(sales.id, saleId))
+      .returning();
+
+    // 9. Audit log
+    await auditRepo.withTransaction(tx).log({
+      tenantId,
+      userId: auth.userId,
+      action: 'sale_voided',
+      entityType: 'sale',
+      entityId: saleId,
+      newValue: {
+        billNumber: sale.billNumber,
+        reason: data.reason,
+        netPayable,
+        itemCount: items.length,
+        creditReversed: creditPayment ? Number(creditPayment.amount) : 0,
+      },
+    });
+
+    return voided;
+  });
 }

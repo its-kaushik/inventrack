@@ -26,6 +26,11 @@ export const createSaleSchema = z.object({
   clientId: z.string().uuid().optional(),
 });
 
+export const voidSaleSchema = z.object({
+  reason: z.string().min(1, 'Reason is required').max(500),
+  approvalToken: z.string().min(1, 'Owner approval token is required'),
+});
+
 export const parkBillSchema = z.object({
   customerId: z.string().uuid().optional(),
   cartData: z.record(z.string(), z.unknown()),
