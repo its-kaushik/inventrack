@@ -13,8 +13,14 @@ export async function startWorker(): Promise<PgBoss> {
   });
 
   await boss.start();
-  console.info('[pg-boss] Worker started');
 
+  // Register job handlers
+  const { handleResizeProductImage } = await import('./resize-product-image.js');
+  await boss.work('resize-product-image', async ([job]) => {
+    await handleResizeProductImage(job.data as any);
+  });
+
+  console.info('[pg-boss] Worker started');
   return boss;
 }
 
