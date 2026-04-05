@@ -1,71 +1,59 @@
 import { Hono } from 'hono';
-import { z } from 'zod';
-import * as tenantService from '../services/tenant.service.js';
-import { authMiddleware } from '../middleware/auth.js';
-import { tenantScope } from '../middleware/tenant-scope.js';
-import { requireRole } from '../middleware/rbac.js';
-import { validate } from '../middleware/validate.js';
-import { success } from '../lib/response.js';
-import { ValidationError } from '../lib/errors.js';
+import { validate } from '../validators/common.validators.js';
+import { updateSettingsSchema, updateGstSchema } from '../validators/settings.validators.js';
+import * as settingsService from '../services/settings.service.js';
+import { authorize } from '../middleware/rbac.js';
+import { AppError } from '../types/errors.js';
 import type { AppEnv } from '../types/hono.js';
 
-const settings = new Hono<AppEnv>();
+export const settingsRoutes = new Hono<AppEnv>();
 
-// All settings routes require auth + tenant scope
-settings.use('*', authMiddleware, tenantScope);
-
-settings.get('/', requireRole('owner'), async (c) => {
-  const { tenantId } = c.get('tenant');
-  const data = await tenantService.getSettings(tenantId);
-  return c.json(success(data));
+// GET /settings — Owner and Manager can view
+settingsRoutes.get('/', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const settings = await settingsService.getSettings(auth.tenantId);
+  return c.json({ data: settings });
 });
 
-settings.patch('/', requireRole('owner'), validate(z.object({}).passthrough()), async (c) => {
-  const { tenantId } = c.get('tenant');
-  const patch = c.get('validatedBody') as Record<string, unknown>;
-  const data = await tenantService.updateSettings(tenantId, patch);
-  return c.json(success(data));
+// PATCH /settings — Owner only
+settingsRoutes.patch('/', authorize('owner'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const body = validate(updateSettingsSchema, await c.req.json());
+
+  // Convert numbers to strings for NUMERIC columns
+  const data: Record<string, unknown> = {};
+  if (body.defaultBillDiscountPct !== undefined)
+    data.defaultBillDiscountPct = String(body.defaultBillDiscountPct);
+  if (body.maxDiscountPct !== undefined)
+    data.maxDiscountPct = String(body.maxDiscountPct);
+  if (body.returnWindowDays !== undefined) data.returnWindowDays = body.returnWindowDays;
+  if (body.shelfAgingThresholdDays !== undefined)
+    data.shelfAgingThresholdDays = body.shelfAgingThresholdDays;
+  if (body.billNumberPrefix !== undefined) data.billNumberPrefix = body.billNumberPrefix;
+  if (body.receiptFooterMessage !== undefined) data.receiptFooterMessage = body.receiptFooterMessage;
+  if (body.receiptShowReturnPolicy !== undefined)
+    data.receiptShowReturnPolicy = body.receiptShowReturnPolicy;
+  if (body.voidWindowHours !== undefined) data.voidWindowHours = body.voidWindowHours;
+
+  const settings = await settingsService.updateSettings(auth.tenantId, auth.userId, data);
+  return c.json({ data: settings });
 });
 
-settings.get('/store', requireRole('owner'), async (c) => {
-  const { tenantId } = c.get('tenant');
-  const data = await tenantService.getStore(tenantId);
-  return c.json(success(data));
+// GET /settings/gst
+settingsRoutes.get('/gst', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const gst = await settingsService.getGstSettings(auth.tenantId);
+  return c.json({ data: gst });
 });
 
-const updateStoreSchema = z
-  .object({
-    name: z.string().min(1).optional(),
-    address: z.string().optional(),
-    phone: z.string().optional(),
-    email: z.string().email().optional(),
-    logoUrl: z.string().url().optional(),
-    gstin: z.string().max(15).optional(),
-    gstScheme: z.enum(['regular', 'composition']).optional(),
-    financialYearStart: z.number().min(1).max(12).optional(),
-    invoicePrefix: z.string().max(10).optional(),
-  })
-  .refine((data) => Object.keys(data).length > 0, { message: 'At least one field is required' });
-
-settings.patch('/store', requireRole('owner'), validate(updateStoreSchema), async (c) => {
-  const { tenantId } = c.get('tenant');
-  const patch = c.get('validatedBody') as z.infer<typeof updateStoreSchema>;
-  const data = await tenantService.updateStore(tenantId, patch);
-  return c.json(success(data));
+// PATCH /settings/gst — Owner only
+settingsRoutes.patch('/gst', authorize('owner'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const body = validate(updateGstSchema, await c.req.json());
+  const gst = await settingsService.updateGstSettings(auth.tenantId, auth.userId, body);
+  return c.json({ data: gst });
 });
-
-// Data export — available even for suspended tenants (action via POST)
-settings.post('/export-data', requireRole('owner', 'manager'), async (c) => {
-  const { tenantId, userId } = c.get('tenant');
-  const { tenantDataExportQueue } = await import('../jobs/queues.js');
-  if (!tenantDataExportQueue) {
-    throw new ValidationError('Background job processing is not available');
-  }
-  const job = await tenantDataExportQueue.add('tenant-data-export', { tenantId, userId });
-  return c.json(
-    success({ jobId: job.id, message: 'Data export started. You will be notified when ready.' }),
-    202,
-  );
-});
-
-export default settings;

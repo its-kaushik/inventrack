@@ -1,54 +1,96 @@
-import { Worker } from 'bullmq';
-import { createBullMQConnection } from './connection.js';
-import { QUEUE_NAMES } from './queues.js';
-import { logger } from '../lib/logger.js';
-import processHeldBillsCleanup from './processors/held-bills-cleanup.js';
-import processLowStockCheck from './processors/low-stock-check.js';
-import processSupplierPaymentReminders from './processors/supplier-payment-reminders.js';
-import processAgingInventory from './processors/aging-inventory.js';
-import processDailySalesSummary from './processors/daily-sales-summary.js';
-import processRecurringExpenses from './processors/recurring-expenses.js';
-import processPoPdf from './processors/po-pdf.js';
-import processReportExport from './processors/report-export.js';
-import processAuditPartition from './processors/audit-partition.js';
-import processTenantDataExport from './processors/tenant-data-export.js';
+import { PgBoss } from 'pg-boss';
+import type { SendOptions } from 'pg-boss';
+import { env } from '../config/env.js';
 
-const workers: Worker[] = [];
+let boss: PgBoss | null = null;
 
-export function startWorkers() {
-  const connection = createBullMQConnection();
-  if (!connection) return;
+export async function startWorker(): Promise<PgBoss> {
+  // pg-boss needs a direct connection (not PgBouncer) for LISTEN/NOTIFY
+  boss = new PgBoss(env.DATABASE_URL_DIRECT ?? env.DATABASE_URL);
 
-  const workerDefs = [
-    { name: QUEUE_NAMES.HELD_BILLS_CLEANUP, processor: processHeldBillsCleanup },
-    { name: QUEUE_NAMES.LOW_STOCK_CHECK, processor: processLowStockCheck },
-    { name: QUEUE_NAMES.SUPPLIER_PAYMENT_REMINDERS, processor: processSupplierPaymentReminders },
-    { name: QUEUE_NAMES.AGING_INVENTORY_DIGEST, processor: processAgingInventory },
-    { name: QUEUE_NAMES.DAILY_SALES_SUMMARY, processor: processDailySalesSummary },
-    { name: QUEUE_NAMES.RECURRING_EXPENSES, processor: processRecurringExpenses },
-    { name: QUEUE_NAMES.PO_PDF, processor: processPoPdf },
-    { name: QUEUE_NAMES.REPORT_EXPORT, processor: processReportExport },
-    { name: QUEUE_NAMES.AUDIT_PARTITION, processor: processAuditPartition },
-    { name: QUEUE_NAMES.TENANT_DATA_EXPORT, processor: processTenantDataExport },
+  boss.on('error', (error: Error) => {
+    console.error('[pg-boss] Error:', error);
+  });
+
+  await boss.start();
+
+  // pg-boss v12+ requires queues to be created before workers can listen.
+  // createQueue is idempotent — safe to call on every startup.
+  const allQueues = [
+    'resize-product-image',
+    'check-low-stock',
+    'check-shelf-aging',
+    'generate-daily-summary',
+    'check-credit-overdue',
+    'clean-parked-bills',
+    'clean-expired-tokens',
+    'clean-old-notifications',
   ];
+  for (const name of allQueues) {
+    await boss.createQueue(name);
+  }
 
-  for (const { name, processor } of workerDefs) {
-    const worker = new Worker(name, processor, { connection });
+  // Register event-triggered job handlers
+  const { handleResizeProductImage } = await import('./resize-product-image.js');
+  await boss.work('resize-product-image', async ([job]) => {
+    await handleResizeProductImage(job.data as any);
+  });
 
-    worker.on('completed', (job) => {
-      logger.info({ job: job.name, id: job.id }, `Job ${job.name} completed`);
-    });
+  const { handleCheckLowStock } = await import('./check-low-stock.js');
+  await boss.work('check-low-stock', async ([job]) => {
+    await handleCheckLowStock(job.data as any);
+  });
 
-    worker.on('failed', (job, err) => {
-      logger.error({ job: job?.name, id: job?.id, err }, `Job ${job?.name} failed`);
-    });
+  // Cron job handlers (all with singletonKey for horizontal scaling safety)
+  const { handleCheckShelfAging } = await import('./check-shelf-aging.js');
+  const { handleCheckCreditOverdue } = await import('./check-credit-overdue.js');
+  const { handleGenerateDailySummary } = await import('./generate-daily-summary.js');
+  const { handleCleanParkedBills } = await import('./clean-parked-bills.js');
+  const { handleCleanExpiredTokens } = await import('./clean-expired-tokens.js');
+  const { handleCleanOldNotifications } = await import('./clean-old-notifications.js');
 
-    workers.push(worker);
-    logger.info({ queue: name }, `Worker started for ${name}`);
+  // Schedule cron jobs
+  await boss.schedule('check-shelf-aging', '0 0 * * *', {}, { singletonKey: 'check-shelf-aging' });
+  await boss.schedule('generate-daily-summary', '0 21 * * *', {}, { singletonKey: 'generate-daily-summary' });
+  await boss.schedule('check-credit-overdue', '0 8 * * *', {}, { singletonKey: 'check-credit-overdue' });
+  await boss.schedule('clean-parked-bills', '0 * * * *', {}, { singletonKey: 'clean-parked-bills' });
+  await boss.schedule('clean-expired-tokens', '0 3 * * *', {}, { singletonKey: 'clean-expired-tokens' });
+  await boss.schedule('clean-old-notifications', '0 4 * * 0', {}, { singletonKey: 'clean-old-notifications' });
+
+  // Register cron job workers
+  await boss.work('check-shelf-aging', async () => { await handleCheckShelfAging(); });
+  await boss.work('generate-daily-summary', async () => { await handleGenerateDailySummary(); });
+  await boss.work('check-credit-overdue', async () => { await handleCheckCreditOverdue(); });
+  await boss.work('clean-parked-bills', async () => { await handleCleanParkedBills(); });
+  await boss.work('clean-expired-tokens', async () => { await handleCleanExpiredTokens(); });
+  await boss.work('clean-old-notifications', async () => { await handleCleanOldNotifications(); });
+
+  console.info('[pg-boss] Worker started with 8 queues, 8 job handlers, 6 cron schedules');
+  return boss;
+}
+
+export async function stopWorker(): Promise<void> {
+  if (boss) {
+    await boss.stop({ graceful: true, timeout: 10_000 });
+    console.info('[pg-boss] Worker stopped');
+    boss = null;
   }
 }
 
-export async function stopWorkers() {
-  await Promise.all(workers.map((w) => w.close()));
-  workers.length = 0;
+export async function enqueueJob<T extends object>(
+  name: string,
+  data: T,
+  options?: SendOptions,
+): Promise<string | null> {
+  if (!boss) {
+    console.warn('[pg-boss] Worker not started, cannot enqueue job:', name);
+    return null;
+  }
+  // Ensure queue exists (idempotent) before sending
+  await boss.createQueue(name);
+  return boss.send(name, data, options ?? {});
+}
+
+export function getBoss(): PgBoss | null {
+  return boss;
 }

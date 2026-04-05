@@ -1,85 +1,89 @@
 import { Hono } from 'hono';
-import { z } from 'zod';
+import { validate, uuidParam } from '../validators/common.validators.js';
+import {
+  createSupplierSchema,
+  updateSupplierSchema,
+  recordSupplierPaymentSchema,
+  supplierListQuerySchema,
+} from '../validators/supplier.validators.js';
 import * as supplierService from '../services/supplier.service.js';
-import { authMiddleware } from '../middleware/auth.js';
-import { tenantScope } from '../middleware/tenant-scope.js';
-import { requireRole } from '../middleware/rbac.js';
-import { validate } from '../middleware/validate.js';
-import { success } from '../lib/response.js';
+import { authorize } from '../middleware/rbac.js';
+import { AppError } from '../types/errors.js';
 import type { AppEnv } from '../types/hono.js';
 
-const suppliersRouter = new Hono<AppEnv>();
-suppliersRouter.use('*', authMiddleware, tenantScope, requireRole('owner', 'manager'));
+export const supplierRoutes = new Hono<AppEnv>();
 
-suppliersRouter.get('/', async (c) => {
-  const { tenantId } = c.get('tenant');
-  const search = c.req.query('search');
-  const data = await supplierService.listSuppliers(tenantId, search);
-  return c.json(success(data));
+// GET /suppliers — all roles can view
+supplierRoutes.get('/', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const query = validate(supplierListQuerySchema, c.req.query());
+  const result = await supplierService.listSuppliers(auth.tenantId, query);
+  return c.json({
+    data: result.data,
+    meta: { total: result.total, page: result.page, limit: result.limit, totalPages: Math.ceil(result.total / result.limit) },
+  });
 });
 
-suppliersRouter.post('/', validate(z.object({
-  name: z.string().min(1),
-  contactPerson: z.string().optional(),
-  phone: z.string().optional(),
-  email: z.string().email().optional(),
-  address: z.string().optional(),
-  gstin: z.string().max(15).optional(),
-  paymentTerms: z.string().optional(),
-  notes: z.string().optional(),
-})), async (c) => {
-  const { tenantId } = c.get('tenant');
-  const input = c.get('validatedBody') as any;
-  const supplier = await supplierService.createSupplier(tenantId, input);
-  return c.json(success(supplier), 201);
+// POST /suppliers — Owner, Manager only
+supplierRoutes.post('/', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const body = validate(createSupplierSchema, await c.req.json());
+  const supplier = await supplierService.createSupplier(auth.tenantId, auth.userId, body);
+  return c.json({ data: supplier }, 201);
 });
 
-suppliersRouter.get('/:id', async (c) => {
-  const { tenantId } = c.get('tenant');
-  const supplier = await supplierService.getSupplierById(tenantId, c.req.param('id')!);
-  return c.json(success(supplier));
+// GET /suppliers/:id — all roles
+supplierRoutes.get('/:id', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  const supplier = await supplierService.getSupplierById(auth.tenantId, id);
+  return c.json({ data: supplier });
 });
 
-suppliersRouter.put('/:id', validate(z.object({
-  name: z.string().min(1).optional(),
-  contactPerson: z.string().optional(),
-  phone: z.string().optional(),
-  email: z.string().email().optional(),
-  address: z.string().optional(),
-  gstin: z.string().max(15).optional(),
-  paymentTerms: z.string().optional(),
-  notes: z.string().optional(),
-}).refine(d => Object.keys(d).length > 0, { message: 'At least one field required' })), async (c) => {
-  const { tenantId } = c.get('tenant');
-  const patch = c.get('validatedBody') as any;
-  const supplier = await supplierService.updateSupplier(tenantId, c.req.param('id')!, patch);
-  return c.json(success(supplier));
+// PATCH /suppliers/:id — Owner, Manager only
+supplierRoutes.patch('/:id', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  const body = validate(updateSupplierSchema, await c.req.json());
+  const supplier = await supplierService.updateSupplier(auth.tenantId, id, auth.userId, body);
+  return c.json({ data: supplier });
 });
 
-suppliersRouter.get('/:id/ledger', async (c) => {
-  const { tenantId } = c.get('tenant');
-  const limit = Number(c.req.query('limit')) || 50;
-  const offset = Number(c.req.query('offset')) || 0;
-  const data = await supplierService.getSupplierLedger(tenantId, c.req.param('id')!, limit, offset);
-  return c.json(success(data));
+// DELETE /suppliers/:id — Owner, Manager only (soft delete)
+supplierRoutes.delete('/:id', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  await supplierService.deactivateSupplier(auth.tenantId, id, auth.userId);
+  return c.json({ data: { message: 'Supplier deactivated' } });
 });
 
-suppliersRouter.post('/:id/payments', validate(z.object({
-  amount: z.number().positive(),
-  paymentMode: z.enum(['cash', 'upi', 'bank_transfer', 'cheque', 'card']),
-  paymentReference: z.string().optional(),
-  description: z.string().optional(),
-})), async (c) => {
-  const { tenantId, userId } = c.get('tenant');
-  const input = c.get('validatedBody') as any;
-  const entry = await supplierService.recordSupplierPayment(tenantId, userId, c.req.param('id')!, input);
-  return c.json(success(entry), 201);
+// GET /suppliers/:id/ledger — Owner, Manager only
+supplierRoutes.get('/:id/ledger', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  const query = c.req.query();
+  const result = await supplierService.getSupplierLedger(auth.tenantId, id, {
+    page: query.page ? Number(query.page) : 1,
+    limit: query.limit ? Number(query.limit) : 50,
+  });
+  return c.json({
+    data: result.data,
+    meta: { total: result.total, page: result.page, limit: result.limit },
+  });
 });
 
-suppliersRouter.get('/:id/products', async (c) => {
-  const { tenantId } = c.get('tenant');
-  const data = await supplierService.getSupplierProducts(tenantId, c.req.param('id')!);
-  return c.json(success(data));
+// POST /suppliers/:id/payments — Owner, Manager only
+supplierRoutes.post('/:id/payments', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  const body = validate(recordSupplierPaymentSchema, await c.req.json());
+  const result = await supplierService.recordPayment(auth.tenantId, id, auth.userId, body);
+  return c.json({ data: result });
 });
-
-export default suppliersRouter;

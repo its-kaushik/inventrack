@@ -1,51 +1,47 @@
 import { Hono } from 'hono';
-import { z } from 'zod';
+import { validate } from '../validators/common.validators.js';
+import { openRegisterSchema, closeRegisterSchema } from '../validators/expense.validators.js';
 import * as cashRegisterService from '../services/cash-register.service.js';
-import { authMiddleware } from '../middleware/auth.js';
-import { tenantScope } from '../middleware/tenant-scope.js';
-import { validate } from '../middleware/validate.js';
-import { success } from '../lib/response.js';
+import { authorize } from '../middleware/rbac.js';
+import { AppError } from '../types/errors.js';
 import type { AppEnv } from '../types/hono.js';
 
-const cashRegisterRouter = new Hono<AppEnv>();
-cashRegisterRouter.use('*', authMiddleware, tenantScope);
+export const cashRegisterRoutes = new Hono<AppEnv>();
 
-cashRegisterRouter.post('/open', validate(z.object({
-  openingBalance: z.number().min(0),
-})), async (c) => {
-  const { tenantId, userId } = c.get('tenant');
-  const { openingBalance } = c.get('validatedBody') as { openingBalance: number };
-  const register = await cashRegisterService.openRegister(tenantId, userId, openingBalance);
-  return c.json(success(register), 201);
+// All cash register routes: Owner, Manager only
+cashRegisterRoutes.use('*', authorize('owner', 'manager'));
+
+// POST /cash-register/open
+cashRegisterRoutes.post('/open', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const body = validate(openRegisterSchema, await c.req.json());
+  const register = await cashRegisterService.openRegister(auth.tenantId, auth.userId, body.openingBalance);
+  return c.json({ data: register }, 201);
 });
 
-cashRegisterRouter.get('/current', async (c) => {
-  const { tenantId, userId } = c.get('tenant');
-  const register = await cashRegisterService.getCurrentRegister(tenantId, userId);
-  return c.json(success(register));
+// POST /cash-register/close
+cashRegisterRoutes.post('/close', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const body = validate(closeRegisterSchema, await c.req.json());
+  const register = await cashRegisterService.closeRegister(auth.tenantId, auth.userId, body.actualClosing);
+  return c.json({ data: register });
 });
 
-cashRegisterRouter.get('/history', async (c) => {
-  const { tenantId, userId } = c.get('tenant');
-  const limit = Number(c.req.query('limit')) || 20;
-  const offset = Number(c.req.query('offset')) || 0;
-  const data = await cashRegisterService.getRegisterHistory(tenantId, userId, limit, offset);
-  return c.json(success(data));
+// GET /cash-register/current
+cashRegisterRoutes.get('/current', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const register = await cashRegisterService.getCurrentRegister(auth.tenantId);
+  return c.json({ data: register });
 });
 
-cashRegisterRouter.get('/:id', async (c) => {
-  const { tenantId } = c.get('tenant');
-  const register = await cashRegisterService.getRegisterById(tenantId, c.req.param('id')!);
-  return c.json(success(register));
+// GET /cash-register/:date
+cashRegisterRoutes.get('/:date', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const date = c.req.param('date');
+  const register = await cashRegisterService.getRegisterByDate(auth.tenantId, date);
+  return c.json({ data: register });
 });
-
-cashRegisterRouter.post('/:id/close', validate(z.object({
-  actualClosing: z.number().min(0),
-})), async (c) => {
-  const { tenantId, userId } = c.get('tenant');
-  const { actualClosing } = c.get('validatedBody') as { actualClosing: number };
-  const register = await cashRegisterService.closeRegister(tenantId, userId, c.req.param('id')!, actualClosing);
-  return c.json(success(register));
-});
-
-export default cashRegisterRouter;

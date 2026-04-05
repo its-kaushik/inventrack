@@ -1,83 +1,105 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import * as purchaseOrderService from '../services/purchase-order.service.js';
-import { authMiddleware } from '../middleware/auth.js';
-import { tenantScope } from '../middleware/tenant-scope.js';
-import { requireRole } from '../middleware/rbac.js';
-import { validate } from '../middleware/validate.js';
-import { success, paginated } from '../lib/response.js';
+import { validate, uuidParam, moneySchema } from '../validators/common.validators.js';
+import * as poService from '../services/purchase-order.service.js';
+import { authorize } from '../middleware/rbac.js';
+import { AppError } from '../types/errors.js';
 import type { AppEnv } from '../types/hono.js';
 
-const purchaseOrdersRouter = new Hono<AppEnv>();
+export const purchaseOrderRoutes = new Hono<AppEnv>();
 
-purchaseOrdersRouter.use('*', authMiddleware, tenantScope, requireRole('owner', 'manager'));
-
-// ======================== SCHEMAS ========================
+purchaseOrderRoutes.use('*', authorize('owner', 'manager'));
 
 const createPOSchema = z.object({
   supplierId: z.string().uuid(),
+  expectedDate: z.string().optional(),
   notes: z.string().optional(),
-  items: z
-    .array(
-      z.object({
-        productId: z.string().uuid(),
-        orderedQty: z.number().int().positive(),
-        expectedCost: z.number().positive(),
-      }),
-    )
-    .min(1),
+  items: z.array(z.object({
+    variantId: z.string().uuid(),
+    orderedQuantity: z.number().int().positive(),
+    expectedCostPrice: moneySchema,
+  })).min(1),
 });
 
-const updatePOSchema = z
-  .object({
-    notes: z.string().optional(),
-    status: z.enum(['sent', 'cancelled']).optional(),
-  })
-  .refine((data) => data.notes !== undefined || data.status !== undefined, {
-    message: 'At least one of notes or status must be provided',
+const createReturnSchema = z.object({
+  supplierId: z.string().uuid(),
+  goodsReceiptId: z.string().uuid().optional(),
+  reason: z.string().optional(),
+  items: z.array(z.object({
+    variantId: z.string().uuid(),
+    quantity: z.number().int().positive(),
+    costPrice: moneySchema,
+  })).min(1),
+});
+
+// GET /purchase-orders
+purchaseOrderRoutes.get('/', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const query = c.req.query();
+  const result = await poService.listPurchaseOrders(auth.tenantId, {
+    supplierId: query.supplierId,
+    status: query.status,
+    page: query.page ? Number(query.page) : 1,
+    limit: query.limit ? Number(query.limit) : 50,
   });
-
-// ======================== ROUTES ========================
-
-purchaseOrdersRouter.post('/', validate(createPOSchema), async (c) => {
-  const { tenantId, userId } = c.get('tenant');
-  const input = c.get('validatedBody') as z.infer<typeof createPOSchema>;
-  const po = await purchaseOrderService.createPurchaseOrder(tenantId, userId, input);
-  return c.json(success(po), 201);
+  return c.json({
+    data: result.data,
+    meta: { total: result.total, page: result.page, limit: result.limit, totalPages: Math.ceil(result.total / result.limit) },
+  });
 });
 
-purchaseOrdersRouter.get('/', async (c) => {
-  const { tenantId } = c.get('tenant');
-  const filters = {
-    supplierId: c.req.query('supplier_id'),
-    status: c.req.query('status'),
-    limit: Number(c.req.query('limit')) || 20,
-    offset: Number(c.req.query('offset')) || 0,
-  };
-  const result = await purchaseOrderService.listPurchaseOrders(tenantId, filters);
-  return c.json(paginated(result.items, result.hasMore ? 'next' : null, result.hasMore));
+// POST /purchase-orders
+purchaseOrderRoutes.post('/', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const body = validate(createPOSchema, await c.req.json());
+  const po = await poService.createPurchaseOrder(auth.tenantId, auth.userId, body);
+  return c.json({ data: po }, 201);
 });
 
-purchaseOrdersRouter.get('/:id', async (c) => {
-  const { tenantId } = c.get('tenant');
-  const id = c.req.param('id')!;
-  const po = await purchaseOrderService.getPurchaseOrderById(tenantId, id);
-  return c.json(success(po));
+// POST /purchase-orders/:id/send
+purchaseOrderRoutes.post('/:id/send', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  const po = await poService.updatePOStatus(auth.tenantId, id, auth.userId, 'sent');
+  return c.json({ data: po });
 });
 
-purchaseOrdersRouter.patch('/:id', validate(updatePOSchema), async (c) => {
-  const { tenantId } = c.get('tenant');
-  const id = c.req.param('id')!;
-  const patch = c.get('validatedBody') as z.infer<typeof updatePOSchema>;
-  const po = await purchaseOrderService.updatePurchaseOrder(tenantId, id, patch);
-  return c.json(success(po));
+// POST /purchase-orders/:id/cancel
+purchaseOrderRoutes.post('/:id/cancel', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  const po = await poService.cancelPurchaseOrder(auth.tenantId, id, auth.userId);
+  return c.json({ data: po });
 });
 
-purchaseOrdersRouter.get('/:id/pdf', async (c) => {
-  const { tenantId } = c.get('tenant');
-  const id = c.req.param('id')!;
-  const po = await purchaseOrderService.getPurchaseOrderById(tenantId, id);
-  return c.json(success(po));
+// GET /purchase-orders/:id
+purchaseOrderRoutes.get('/:id', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  const po = await poService.getPurchaseOrderById(auth.tenantId, id);
+  return c.json({ data: po });
 });
 
-export default purchaseOrdersRouter;
+// PATCH /purchase-orders/:id
+purchaseOrderRoutes.patch('/:id', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  const body = await c.req.json() as { expectedDate?: string; notes?: string };
+  const po = await poService.updatePurchaseOrder(auth.tenantId, id, auth.userId, body);
+  return c.json({ data: po });
+});
+
+// POST /purchase-returns
+purchaseOrderRoutes.post('/returns', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const body = validate(createReturnSchema, await c.req.json());
+  const result = await poService.createPurchaseReturn(auth.tenantId, auth.userId, body);
+  return c.json({ data: result }, 201);
+});

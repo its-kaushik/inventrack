@@ -1,149 +1,121 @@
-import { eq, and, desc, sql, gte, lte } from 'drizzle-orm';
-import { db } from '../config/database.js';
-import { expenses } from '../db/schema/expenses.js';
-import { NotFoundError } from '../lib/errors.js';
+import { eq, and, isNull, desc, count, sql } from 'drizzle-orm';
+import { db } from '../db/client.js';
+import { expenses, expenseCategories } from '../db/schema/expenses.js';
+import { AppError } from '../types/errors.js';
 
-const DEFAULT_CATEGORIES = [
-  'Rent',
-  'Electricity',
-  'Salary',
-  'Transport',
-  'Packaging',
-  'Repairs',
-  'Miscellaneous',
-];
+// ── Categories ──
 
-interface CreateExpenseInput {
-  category: string;
-  amount: number;
-  description?: string;
-  expenseDate: string;
-  isRecurring?: boolean;
-  recurrenceInterval?: string;
-  receiptImageUrl?: string;
+export async function listCategories(tenantId: string) {
+  return db
+    .select()
+    .from(expenseCategories)
+    .where(eq(expenseCategories.tenantId, tenantId))
+    .orderBy(expenseCategories.name);
 }
 
-export async function createExpense(tenantId: string, userId: string, input: CreateExpenseInput) {
+export async function createCategory(tenantId: string, name: string) {
+  const [cat] = await db
+    .insert(expenseCategories)
+    .values({ tenantId, name })
+    .returning();
+  return cat;
+}
+
+// ── Expenses ──
+
+export async function createExpense(
+  tenantId: string,
+  userId: string,
+  data: {
+    date: string;
+    amount: number;
+    categoryId?: string;
+    paymentMode: 'cash' | 'upi' | 'bank_transfer';
+    notes?: string;
+    receiptUrl?: string;
+  },
+) {
   const [expense] = await db
     .insert(expenses)
     .values({
       tenantId,
-      category: input.category,
-      amount: String(input.amount),
-      description: input.description,
-      expenseDate: input.expenseDate,
-      isRecurring: input.isRecurring ?? false,
-      recurrenceInterval: input.recurrenceInterval,
-      receiptImageUrl: input.receiptImageUrl,
+      date: data.date,
+      amount: String(data.amount),
+      categoryId: data.categoryId ?? null,
+      paymentMode: data.paymentMode,
+      notes: data.notes ?? null,
+      receiptUrl: data.receiptUrl ?? null,
       createdBy: userId,
     })
     .returning();
-
   return expense;
 }
 
 export async function listExpenses(
   tenantId: string,
-  filters: {
-    category?: string;
-    from?: string;
-    to?: string;
-    isRecurring?: boolean;
-    limit?: number;
-    offset?: number;
-  },
+  opts?: { month?: string; page?: number; limit?: number },
 ) {
-  const conditions: any[] = [eq(expenses.tenantId, tenantId)];
+  const page = opts?.page ?? 1;
+  const limit = opts?.limit ?? 50;
+  const offset = (page - 1) * limit;
 
-  if (filters.category) {
-    conditions.push(eq(expenses.category, filters.category));
-  }
-  if (filters.from) {
-    conditions.push(gte(expenses.expenseDate, filters.from));
-  }
-  if (filters.to) {
-    conditions.push(lte(expenses.expenseDate, filters.to));
-  }
-  if (filters.isRecurring !== undefined) {
-    conditions.push(eq(expenses.isRecurring, filters.isRecurring));
+  const conditions = [eq(expenses.tenantId, tenantId), isNull(expenses.deletedAt)];
+
+  if (opts?.month) {
+    // month format: '2026-04'
+    conditions.push(sql`to_char(${expenses.date}, 'YYYY-MM') = ${opts.month}`);
   }
 
-  const limit = Math.min(filters.limit || 20, 100);
-  const offset = filters.offset || 0;
+  const where = and(...conditions);
 
-  const items = await db
-    .select()
+  const [data, totalResult] = await Promise.all([
+    db.select().from(expenses).where(where).orderBy(desc(expenses.date)).limit(limit).offset(offset),
+    db.select({ total: count() }).from(expenses).where(where),
+  ]);
+
+  // Calculate total for the period
+  const [sumResult] = await db
+    .select({ total: sql<string>`COALESCE(SUM(${expenses.amount}), 0)` })
     .from(expenses)
-    .where(and(...conditions))
-    .orderBy(desc(expenses.expenseDate))
-    .limit(limit + 1)
-    .offset(offset);
+    .where(where);
 
-  const hasMore = items.length > limit;
-  if (hasMore) items.pop();
-
-  return { items, hasMore };
+  return {
+    data,
+    total: totalResult[0]?.total ?? 0,
+    page,
+    limit,
+    periodTotal: Number(sumResult?.total ?? 0),
+  };
 }
 
 export async function getExpenseById(tenantId: string, expenseId: string) {
   const [expense] = await db
     .select()
     .from(expenses)
-    .where(and(eq(expenses.id, expenseId), eq(expenses.tenantId, tenantId)))
-    .limit(1);
-
-  if (!expense) throw new NotFoundError('Expense', expenseId);
-
+    .where(and(eq(expenses.id, expenseId), eq(expenses.tenantId, tenantId), isNull(expenses.deletedAt)));
+  if (!expense) throw new AppError('NOT_FOUND', 'Expense not found', 404);
   return expense;
 }
 
 export async function updateExpense(
   tenantId: string,
   expenseId: string,
-  patch: Partial<CreateExpenseInput>,
+  data: Record<string, unknown>,
 ) {
-  // Verify expense exists
-  await getExpenseById(tenantId, expenseId);
-
-  const updateData: Record<string, any> = { updatedAt: new Date() };
-  if (patch.category !== undefined) updateData.category = patch.category;
-  if (patch.amount !== undefined) updateData.amount = String(patch.amount);
-  if (patch.description !== undefined) updateData.description = patch.description;
-  if (patch.expenseDate !== undefined) updateData.expenseDate = patch.expenseDate;
-  if (patch.isRecurring !== undefined) updateData.isRecurring = patch.isRecurring;
-  if (patch.recurrenceInterval !== undefined)
-    updateData.recurrenceInterval = patch.recurrenceInterval;
-  if (patch.receiptImageUrl !== undefined) updateData.receiptImageUrl = patch.receiptImageUrl;
-
   const [updated] = await db
     .update(expenses)
-    .set(updateData)
-    .where(and(eq(expenses.id, expenseId), eq(expenses.tenantId, tenantId)))
+    .set({ ...data, updatedAt: new Date() })
+    .where(and(eq(expenses.id, expenseId), eq(expenses.tenantId, tenantId), isNull(expenses.deletedAt)))
     .returning();
-
+  if (!updated) throw new AppError('NOT_FOUND', 'Expense not found', 404);
   return updated;
 }
 
 export async function deleteExpense(tenantId: string, expenseId: string) {
-  // Verify expense exists
-  await getExpenseById(tenantId, expenseId);
-
-  await db.delete(expenses).where(and(eq(expenses.id, expenseId), eq(expenses.tenantId, tenantId)));
-}
-
-export async function listCategories(tenantId: string) {
-  const dbCategories = (await db.execute(sql`
-    SELECT DISTINCT category FROM expenses WHERE tenant_id = ${tenantId}
-  `)) as any[];
-
-  const dbSet = new Set(dbCategories.map((r: any) => r.category));
-  const allCategories = [...DEFAULT_CATEGORIES];
-
-  for (const cat of dbSet) {
-    if (!allCategories.includes(cat)) {
-      allCategories.push(cat);
-    }
-  }
-
-  return allCategories.sort();
+  const [deleted] = await db
+    .update(expenses)
+    .set({ deletedAt: new Date() })
+    .where(and(eq(expenses.id, expenseId), eq(expenses.tenantId, tenantId), isNull(expenses.deletedAt)))
+    .returning({ id: expenses.id });
+  if (!deleted) throw new AppError('NOT_FOUND', 'Expense not found', 404);
 }

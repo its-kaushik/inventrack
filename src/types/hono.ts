@@ -1,9 +1,9 @@
-import type { TenantContext, AdminContext } from './context.js';
+import type { AuthContext } from './context.js';
 
+// Extend Hono's context variables to include our auth context and request ID
 export type AppEnv = {
   Variables: {
-    tenant: TenantContext;
-    adminUser?: AdminContext;
-    validatedBody: unknown;
+    auth: AuthContext;
+    requestId: string;
   };
 };

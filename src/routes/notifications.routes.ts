@@ -1,39 +1,41 @@
 import { Hono } from 'hono';
+import { validate, uuidParam } from '../validators/common.validators.js';
 import * as notificationService from '../services/notification.service.js';
-import { authMiddleware } from '../middleware/auth.js';
-import { tenantScope } from '../middleware/tenant-scope.js';
-import { success, paginated } from '../lib/response.js';
+import { AppError } from '../types/errors.js';
 import type { AppEnv } from '../types/hono.js';
 
-const notificationsRouter = new Hono<AppEnv>();
+export const notificationRoutes = new Hono<AppEnv>();
 
-notificationsRouter.use('*', authMiddleware, tenantScope);
-
-notificationsRouter.get('/unread-count', async (c) => {
-  const { tenantId, userId } = c.get('tenant');
-  const count = await notificationService.getUnreadCount(tenantId, userId);
-  return c.json(success({ count }));
+// GET /notifications — list for current user
+notificationRoutes.get('/', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const query = c.req.query();
+  const isRead = query.isRead === 'true' ? true : query.isRead === 'false' ? false : undefined;
+  const result = await notificationService.listNotifications(auth.tenantId, auth.userId, {
+    isRead,
+    page: query.page ? Number(query.page) : 1,
+    limit: query.limit ? Number(query.limit) : 50,
+  });
+  return c.json({
+    data: result.data,
+    meta: { total: result.total, unreadCount: result.unreadCount, page: result.page, limit: result.limit },
+  });
 });
 
-notificationsRouter.patch('/read-all', async (c) => {
-  const { tenantId, userId } = c.get('tenant');
-  const result = await notificationService.markAllAsRead(tenantId, userId);
-  return c.json(success(result));
+// PATCH /notifications/:id/read — mark as read
+notificationRoutes.patch('/:id/read', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  await notificationService.markAsRead(auth.tenantId, auth.userId, id);
+  return c.json({ data: { message: 'Marked as read' } });
 });
 
-notificationsRouter.get('/', async (c) => {
-  const { tenantId, userId } = c.get('tenant');
-  const limit = Number(c.req.query('limit')) || 20;
-  const offset = Number(c.req.query('offset')) || 0;
-  const result = await notificationService.listNotifications(tenantId, userId, limit, offset);
-  return c.json(paginated(result.items, result.hasMore ? 'next' : null, result.hasMore));
+// POST /notifications/mark-all-read — mark all as read
+notificationRoutes.post('/mark-all-read', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  await notificationService.markAllAsRead(auth.tenantId, auth.userId);
+  return c.json({ data: { message: 'All notifications marked as read' } });
 });
-
-notificationsRouter.patch('/:id/read', async (c) => {
-  const { tenantId } = c.get('tenant');
-  const notificationId = c.req.param('id')!;
-  const notification = await notificationService.markAsRead(tenantId, notificationId);
-  return c.json(success(notification));
-});
-
-export default notificationsRouter;

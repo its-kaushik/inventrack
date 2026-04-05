@@ -1,560 +1,839 @@
-import { sql } from 'drizzle-orm';
-import { db } from '../config/database.js';
-import { NotFoundError, ValidationError } from '../lib/errors.js';
+import { eq, and, sql, gt, isNull, asc, desc, count } from 'drizzle-orm';
+import { db } from '../db/client.js';
+import { sales, saleItems } from '../db/schema/sales.js';
+import { productVariants, products, inventoryMovements } from '../db/schema/products.js';
+import { customers } from '../db/schema/customers.js';
+import { suppliers } from '../db/schema/suppliers.js';
+import { syncConflicts } from '../db/schema/sync.js';
+import { goodsReceipts } from '../db/schema/purchases.js';
+import { tenantSettings, tenants } from '../db/schema/tenants.js';
+import { expenses } from '../db/schema/expenses.js';
+import { customerTransactions } from '../db/schema/customers.js';
+import { users } from '../db/schema/users.js';
 
-export interface ReportParams {
-  from?: string;
-  to?: string;
-  limit?: number;
-  offset?: number;
-  partyId?: string;
-  registerId?: string;
+function todayStart(): string {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.toISOString();
 }
 
-export async function getReport(tenantId: string, type: string, params: ReportParams) {
-  switch (type) {
-    case 'daily-sales':
-      return dailySalesReport(tenantId, params);
-    case 'sales-by-category':
-      return salesByCategoryReport(tenantId, params);
-    case 'sales-by-salesperson':
-      return salesBySalespersonReport(tenantId, params);
-    case 'inventory-valuation':
-      return inventoryValuationReport(tenantId, params);
-    case 'low-stock':
-      return lowStockReport(tenantId, params);
-    case 'outstanding-payables':
-      return outstandingPayablesReport(tenantId, params);
-    case 'outstanding-receivables':
-      return outstandingReceivablesReport(tenantId, params);
-    case 'customer-ledger':
-      return customerLedgerReport(tenantId, params);
-    case 'supplier-ledger':
-      return supplierLedgerReport(tenantId, params);
-    case 'cash-register':
-      return cashRegisterReport(tenantId, params);
-    case 'pnl':
-      return pnlReport(tenantId, params);
-    case 'purchase-summary':
-      return purchaseSummaryReport(tenantId, params);
-    case 'expense':
-      return expenseReport(tenantId, params);
-    case 'gst-summary':
-      return gstSummaryReport(tenantId, params);
-    case 'bargain-discount':
-      return bargainDiscountReport(tenantId, params);
-    case 'aging-inventory':
-      return agingInventoryReport(tenantId, params);
-    case 'dead-stock':
-      return deadStockReport(tenantId, params);
-    default:
-      throw new NotFoundError('Report type', type);
-  }
+function monthStart(): string {
+  const d = new Date();
+  d.setDate(1);
+  d.setHours(0, 0, 0, 0);
+  return d.toISOString();
 }
 
-// ---------- helpers ----------
-
-function dateFilter(from?: string, to?: string, col = 'created_at') {
-  const clauses: string[] = [];
-  if (from) clauses.push(`${col} >= '${from}'`);
-  if (to) clauses.push(`${col} <= '${to}'`);
-  return clauses.length > 0 ? `AND ${clauses.join(' AND ')}` : '';
+function lastMonthStart(): string {
+  const d = new Date();
+  d.setMonth(d.getMonth() - 1);
+  d.setDate(1);
+  d.setHours(0, 0, 0, 0);
+  return d.toISOString();
 }
 
-// ---------- 1. Daily Sales ----------
-
-async function dailySalesReport(tenantId: string, params: ReportParams) {
-  const { from, to } = params;
-  const rows = await db.execute(
-    sql.raw(`
-    SELECT DATE(b.created_at) AS sale_date,
-           COALESCE(SUM(CAST(b.net_amount AS numeric)), 0) AS total_sales,
-           COUNT(*)::int AS bill_count
-    FROM bills b
-    WHERE b.tenant_id = '${tenantId}'
-      AND b.status IN ('completed', 'partially_returned')
-      ${dateFilter(from, to, 'b.created_at')}
-    GROUP BY DATE(b.created_at)
-    ORDER BY sale_date DESC
-  `),
-  );
-
-  const paymentRows = await db.execute(
-    sql.raw(`
-    SELECT DATE(b.created_at) AS sale_date,
-           bp.mode,
-           COALESCE(SUM(CAST(bp.amount AS numeric)), 0) AS mode_total
-    FROM bill_payments bp
-    JOIN bills b ON bp.bill_id = b.id
-    WHERE b.tenant_id = '${tenantId}'
-      AND b.status IN ('completed', 'partially_returned')
-      ${dateFilter(from, to, 'b.created_at')}
-    GROUP BY DATE(b.created_at), bp.mode
-    ORDER BY sale_date DESC
-  `),
-  );
-
-  return { rows, paymentSplit: paymentRows };
+function lastMonthEnd(): string {
+  const d = new Date();
+  d.setDate(0); // last day of previous month
+  d.setHours(23, 59, 59, 999);
+  return d.toISOString();
 }
 
-// ---------- 2. Sales by Category ----------
+export async function getDashboard(tenantId: string) {
+  const todayStr = todayStart();
+  const mtdStr = monthStart();
+  const lastMStart = lastMonthStart();
+  const lastMEnd = lastMonthEnd();
 
-async function salesByCategoryReport(tenantId: string, params: ReportParams) {
-  const { from, to } = params;
-  const rows = await db.execute(
-    sql.raw(`
-    SELECT c.name AS category_name,
-           COALESCE(SUM(CAST(bi.line_total AS numeric)), 0) AS revenue,
-           SUM(bi.quantity)::int AS units_sold
-    FROM bill_items bi
-    JOIN bills b ON bi.bill_id = b.id
-    JOIN products p ON bi.product_id = p.id
-    JOIN categories c ON p.category_id = c.id
-    WHERE b.tenant_id = '${tenantId}'
-      AND b.status IN ('completed', 'partially_returned')
-      ${dateFilter(from, to, 'b.created_at')}
-    GROUP BY c.name
-    ORDER BY revenue DESC
-  `),
-  );
-  return { rows };
-}
+  // 1. Today's sales
+  const [todaySales] = await db.execute(sql`
+    SELECT
+      COALESCE(COUNT(*), 0)::int as transaction_count,
+      COALESCE(SUM(net_payable::numeric), 0) as total_revenue,
+      CASE WHEN COUNT(*) > 0 THEN ROUND(SUM(net_payable::numeric) / COUNT(*), 2) ELSE 0 END as avg_value
+    FROM sales
+    WHERE tenant_id = ${tenantId}
+      AND status = 'completed'
+      AND created_at >= ${todayStr}::timestamptz
+  `);
 
-// ---------- 3. Sales by Salesperson ----------
+  // 2. MTD sales
+  const [mtdSales] = await db.execute(sql`
+    SELECT COALESCE(SUM(net_payable::numeric), 0) as total_revenue
+    FROM sales
+    WHERE tenant_id = ${tenantId}
+      AND status = 'completed'
+      AND created_at >= ${mtdStr}::timestamptz
+  `);
 
-async function salesBySalespersonReport(tenantId: string, params: ReportParams) {
-  const { from, to } = params;
-  const rows = await db.execute(
-    sql.raw(`
-    SELECT b.salesperson_id,
-           u.name AS salesperson_name,
-           COALESCE(SUM(CAST(b.net_amount AS numeric)), 0) AS total_sales,
-           COUNT(*)::int AS bill_count
-    FROM bills b
-    JOIN users u ON b.salesperson_id = u.id
-    WHERE b.tenant_id = '${tenantId}'
-      AND b.status IN ('completed', 'partially_returned')
-      ${dateFilter(from, to, 'b.created_at')}
-    GROUP BY b.salesperson_id, u.name
-    ORDER BY total_sales DESC
-  `),
-  );
-  return { rows };
-}
+  // 3. Last month sales (for comparison)
+  const [lastMonthSales] = await db.execute(sql`
+    SELECT COALESCE(SUM(net_payable::numeric), 0) as total_revenue
+    FROM sales
+    WHERE tenant_id = ${tenantId}
+      AND status = 'completed'
+      AND created_at >= ${lastMStart}::timestamptz
+      AND created_at <= ${lastMEnd}::timestamptz
+  `);
 
-// ---------- 4. Inventory Valuation ----------
+  // 4. Low stock count
+  const [lowStock] = await db.execute(sql`
+    SELECT COUNT(*)::int as count
+    FROM product_variants pv
+    INNER JOIN products p ON pv.product_id = p.id
+    WHERE pv.tenant_id = ${tenantId}
+      AND pv.is_active = true
+      AND pv.low_stock_threshold IS NOT NULL
+      AND pv.available_quantity <= pv.low_stock_threshold
+      AND p.deleted_at IS NULL
+      AND p.is_archived = false
+  `);
 
-async function inventoryValuationReport(tenantId: string, _params: ReportParams) {
-  const rows = await db.execute(
-    sql.raw(`
-    SELECT p.id, p.name, p.sku, p.current_stock,
-           CAST(p.cost_price AS numeric) AS unit_cost,
-           (p.current_stock * CAST(p.cost_price AS numeric)) AS stock_value,
-           c.name AS category_name,
-           br.name AS brand_name
-    FROM products p
-    LEFT JOIN categories c ON p.category_id = c.id
-    LEFT JOIN brands br ON p.brand_id = br.id
-    WHERE p.tenant_id = '${tenantId}' AND p.is_active = true
-    ORDER BY stock_value DESC
-  `),
-  );
+  // 5. Aging alerts count
+  const [settings] = await db
+    .select({ threshold: tenantSettings.shelfAgingThresholdDays })
+    .from(tenantSettings)
+    .where(eq(tenantSettings.tenantId, tenantId));
 
-  const summary = await db.execute(
-    sql.raw(`
-    SELECT COALESCE(SUM(p.current_stock * CAST(p.cost_price AS numeric)), 0) AS total_valuation,
-           SUM(p.current_stock)::int AS total_units,
-           COUNT(*)::int AS product_count
-    FROM products p
-    WHERE p.tenant_id = '${tenantId}' AND p.is_active = true
-  `),
-  );
+  const thresholdDays = settings?.threshold ?? 90;
+  const agingCutoff = new Date();
+  agingCutoff.setDate(agingCutoff.getDate() - thresholdDays);
 
-  return { rows, summary: (summary as any[])[0] ?? null };
-}
+  const [agingCount] = await db.execute(sql`
+    SELECT COUNT(DISTINCT pv.id)::int as count
+    FROM product_variants pv
+    INNER JOIN products p ON pv.product_id = p.id
+    INNER JOIN inventory_movements im ON im.variant_id = pv.id
+      AND im.movement_type IN ('purchase', 'opening_balance')
+    WHERE pv.tenant_id = ${tenantId}
+      AND pv.is_active = true
+      AND pv.available_quantity > 0
+      AND p.deleted_at IS NULL
+      AND p.is_archived = false
+    GROUP BY pv.id
+    HAVING MIN(im.created_at) < ${agingCutoff.toISOString()}::timestamptz
+  `);
 
-// ---------- 5. Low Stock ----------
+  // 6. Credit summary
+  const [receivable] = await db.execute(sql`
+    SELECT COALESCE(SUM(outstanding_balance::numeric), 0) as total
+    FROM customers
+    WHERE tenant_id = ${tenantId}
+      AND deleted_at IS NULL
+      AND outstanding_balance::numeric > 0
+  `);
 
-async function lowStockReport(tenantId: string, params: ReportParams) {
-  const limit = params.limit ?? 50;
-  const offset = params.offset ?? 0;
+  const [payable] = await db.execute(sql`
+    SELECT COALESCE(SUM(outstanding_balance::numeric), 0) as total
+    FROM suppliers
+    WHERE tenant_id = ${tenantId}
+      AND deleted_at IS NULL
+      AND outstanding_balance::numeric > 0
+  `);
 
-  const rows = await db.execute(
-    sql.raw(`
-    SELECT p.id, p.name, p.sku, p.current_stock, p.min_stock_level,
-           (p.min_stock_level - p.current_stock) AS deficit,
-           c.name AS category_name
-    FROM products p
-    LEFT JOIN categories c ON p.category_id = c.id
-    WHERE p.tenant_id = '${tenantId}' AND p.is_active = true
-      AND p.current_stock <= p.min_stock_level
-    ORDER BY deficit DESC
-    LIMIT ${limit + 1} OFFSET ${offset}
-  `),
-  );
+  // 7. Top 5 selling products today
+  const topSelling = await db.execute(sql`
+    SELECT
+      si.product_name,
+      SUM(si.quantity)::int as total_qty,
+      SUM(si.line_total::numeric) as total_revenue
+    FROM sale_items si
+    INNER JOIN sales s ON si.sale_id = s.id
+    WHERE s.tenant_id = ${tenantId}
+      AND s.status = 'completed'
+      AND s.created_at >= ${todayStr}::timestamptz
+    GROUP BY si.product_name
+    ORDER BY total_qty DESC
+    LIMIT 5
+  `);
 
-  const items = (rows as any[]).slice(0, limit);
-  const hasMore = (rows as any[]).length > limit;
-  return { rows: items, hasMore };
-}
-
-// ---------- 6. Outstanding Payables ----------
-
-async function outstandingPayablesReport(tenantId: string, _params: ReportParams) {
-  const rows = await db.execute(
-    sql.raw(`
-    SELECT s.id, s.name, CAST(s.outstanding_balance AS numeric) AS outstanding_balance,
-           MIN(le.due_date) AS earliest_due_date,
-           COALESCE(SUM(CASE WHEN le.due_date < CURRENT_DATE - INTERVAL '90 days' THEN CAST(le.debit AS numeric) - CAST(le.credit AS numeric) ELSE 0 END), 0) AS over_90_days,
-           COALESCE(SUM(CASE WHEN le.due_date >= CURRENT_DATE - INTERVAL '90 days' AND le.due_date < CURRENT_DATE - INTERVAL '60 days' THEN CAST(le.debit AS numeric) - CAST(le.credit AS numeric) ELSE 0 END), 0) AS "61_90_days",
-           COALESCE(SUM(CASE WHEN le.due_date >= CURRENT_DATE - INTERVAL '60 days' AND le.due_date < CURRENT_DATE - INTERVAL '30 days' THEN CAST(le.debit AS numeric) - CAST(le.credit AS numeric) ELSE 0 END), 0) AS "31_60_days",
-           COALESCE(SUM(CASE WHEN le.due_date >= CURRENT_DATE - INTERVAL '30 days' THEN CAST(le.debit AS numeric) - CAST(le.credit AS numeric) ELSE 0 END), 0) AS "0_30_days"
-    FROM suppliers s
-    LEFT JOIN ledger_entries le ON le.party_id = s.id AND le.party_type = 'supplier' AND le.tenant_id = '${tenantId}'
-    WHERE s.tenant_id = '${tenantId}'
-      AND CAST(s.outstanding_balance AS numeric) > 0
-    GROUP BY s.id, s.name, s.outstanding_balance
-    ORDER BY outstanding_balance DESC
-  `),
-  );
-  return { rows };
-}
-
-// ---------- 7. Outstanding Receivables ----------
-
-async function outstandingReceivablesReport(tenantId: string, _params: ReportParams) {
-  const rows = await db.execute(
-    sql.raw(`
-    SELECT c.id, c.name, c.phone,
-           CAST(c.outstanding_balance AS numeric) AS outstanding_balance
-    FROM customers c
-    WHERE c.tenant_id = '${tenantId}'
-      AND CAST(c.outstanding_balance AS numeric) > 0
-    ORDER BY outstanding_balance DESC
-  `),
-  );
-  return { rows };
-}
-
-// ---------- 8. Customer Ledger ----------
-
-async function customerLedgerReport(tenantId: string, params: ReportParams) {
-  if (!params.partyId) throw new ValidationError('partyId is required for customer-ledger report');
-  const { partyId, from, to, limit = 100, offset = 0 } = params;
-
-  const rows = await db.execute(
-    sql.raw(`
-    SELECT le.id, le.entry_type, le.description,
-           CAST(le.debit AS numeric) AS debit,
-           CAST(le.credit AS numeric) AS credit,
-           le.created_at,
-           SUM(CAST(le.debit AS numeric) - CAST(le.credit AS numeric))
-             OVER (ORDER BY le.created_at, le.id) AS running_balance
-    FROM ledger_entries le
-    WHERE le.tenant_id = '${tenantId}'
-      AND le.party_type = 'customer'
-      AND le.party_id = '${partyId}'
-      ${dateFilter(from, to, 'le.created_at')}
-    ORDER BY le.created_at, le.id
-    LIMIT ${limit + 1} OFFSET ${offset}
-  `),
-  );
-
-  const items = (rows as any[]).slice(0, limit);
-  const hasMore = (rows as any[]).length > limit;
-  return { rows: items, hasMore };
-}
-
-// ---------- 9. Supplier Ledger ----------
-
-async function supplierLedgerReport(tenantId: string, params: ReportParams) {
-  if (!params.partyId) throw new ValidationError('partyId is required for supplier-ledger report');
-  const { partyId, from, to, limit = 100, offset = 0 } = params;
-
-  const rows = await db.execute(
-    sql.raw(`
-    SELECT le.id, le.entry_type, le.description,
-           CAST(le.debit AS numeric) AS debit,
-           CAST(le.credit AS numeric) AS credit,
-           le.created_at,
-           SUM(CAST(le.debit AS numeric) - CAST(le.credit AS numeric))
-             OVER (ORDER BY le.created_at, le.id) AS running_balance
-    FROM ledger_entries le
-    WHERE le.tenant_id = '${tenantId}'
-      AND le.party_type = 'supplier'
-      AND le.party_id = '${partyId}'
-      ${dateFilter(from, to, 'le.created_at')}
-    ORDER BY le.created_at, le.id
-    LIMIT ${limit + 1} OFFSET ${offset}
-  `),
-  );
-
-  const items = (rows as any[]).slice(0, limit);
-  const hasMore = (rows as any[]).length > limit;
-  return { rows: items, hasMore };
-}
-
-// ---------- 10. Cash Register ----------
-
-async function cashRegisterReport(tenantId: string, params: ReportParams) {
-  if (!params.registerId)
-    throw new ValidationError('registerId is required for cash-register report');
-  const { registerId } = params;
-
-  const register = await db.execute(
-    sql.raw(`
-    SELECT cr.id, cr.register_date, cr.opening_balance,
-           cr.calculated_closing, cr.actual_closing, cr.discrepancy, cr.status,
-           u.name AS user_name
-    FROM cash_registers cr
-    JOIN users u ON cr.user_id = u.id
-    WHERE cr.id = '${registerId}' AND cr.tenant_id = '${tenantId}'
-  `),
-  );
-
-  const entries = await db.execute(
-    sql.raw(`
-    SELECT cre.id, cre.type, CAST(cre.amount AS numeric) AS amount,
-           cre.description, cre.reference_type, cre.reference_id, cre.created_at
-    FROM cash_register_entries cre
-    WHERE cre.register_id = '${registerId}'
-    ORDER BY cre.created_at ASC
-  `),
-  );
-
-  return { register: (register as any[])[0] ?? null, entries };
-}
-
-// ---------- 11. Profit & Loss ----------
-
-async function pnlReport(tenantId: string, params: ReportParams) {
-  const { from, to } = params;
-
-  const [revenueResult, cogsResult, expenseResult] = await Promise.all([
-    // Revenue
-    db.execute(
-      sql.raw(`
-      SELECT COALESCE(SUM(CAST(net_amount AS numeric)), 0) AS revenue
-      FROM bills
-      WHERE tenant_id = '${tenantId}'
-        AND status IN ('completed', 'partially_returned')
-        ${dateFilter(from, to)}
-    `),
-    ),
-    // COGS
-    db.execute(
-      sql.raw(`
-      SELECT COALESCE(SUM(CAST(bi.cost_price AS numeric) * bi.quantity), 0) AS cogs
-      FROM bill_items bi
-      JOIN bills b ON bi.bill_id = b.id
-      WHERE b.tenant_id = '${tenantId}'
-        AND b.status IN ('completed', 'partially_returned')
-        ${dateFilter(from, to, 'b.created_at')}
-    `),
-    ),
-    // Expenses
-    db.execute(
-      sql.raw(`
-      SELECT COALESCE(SUM(CAST(amount AS numeric)), 0) AS total_expenses
-      FROM expenses
-      WHERE tenant_id = '${tenantId}'
-        ${dateFilter(from, to, 'expense_date')}
-    `),
-    ),
-  ]);
-
-  const revenue = Number((revenueResult as any[])[0]?.revenue ?? 0);
-  const cogs = Number((cogsResult as any[])[0]?.cogs ?? 0);
-  const totalExpenses = Number((expenseResult as any[])[0]?.total_expenses ?? 0);
-  const grossProfit = revenue - cogs;
-  const netProfit = grossProfit - totalExpenses;
+  // 8. Unresolved sync conflicts count
+  const [conflictCount] = await db.execute(sql`
+    SELECT COUNT(*)::int as count
+    FROM sync_conflicts
+    WHERE tenant_id = ${tenantId}
+      AND status = 'unresolved'
+  `);
 
   return {
-    revenue,
-    cogs,
-    grossProfit,
+    todaySales: {
+      transactionCount: Number((todaySales as any).transaction_count ?? 0),
+      totalRevenue: Number((todaySales as any).total_revenue ?? 0),
+      avgValue: Number((todaySales as any).avg_value ?? 0),
+    },
+    mtdRevenue: Number((mtdSales as any).total_revenue ?? 0),
+    lastMonthRevenue: Number((lastMonthSales as any).total_revenue ?? 0),
+    lowStockCount: Number((lowStock as any).count ?? 0),
+    agingAlertsCount: (agingCount as any)?.count ? Number((agingCount as any).count) : 0,
+    credit: {
+      totalReceivable: Number((receivable as any).total ?? 0),
+      totalPayable: Number((payable as any).total ?? 0),
+    },
+    topSellingToday: (topSelling as any[]).map((r: any) => ({
+      productName: r.product_name,
+      totalQty: Number(r.total_qty),
+      totalRevenue: Number(r.total_revenue),
+    })),
+    syncStatus: {
+      unresolvedConflicts: Number((conflictCount as any).count ?? 0),
+    },
+  };
+}
+
+// ──────────────── Inventory Reports (M14) ────────────────
+
+export async function getCurrentStock(
+  tenantId: string,
+  opts?: { page?: number; limit?: number },
+) {
+  const page = opts?.page ?? 1;
+  const limit = opts?.limit ?? 50;
+  const offset = (page - 1) * limit;
+
+  const data = await db
+    .select({
+      variantId: productVariants.id,
+      productId: productVariants.productId,
+      productName: products.name,
+      sku: productVariants.sku,
+      barcode: productVariants.barcode,
+      availableQuantity: productVariants.availableQuantity,
+      reservedQuantity: productVariants.reservedQuantity,
+      weightedAvgCost: productVariants.weightedAvgCost,
+      mrp: productVariants.mrp,
+      lowStockThreshold: productVariants.lowStockThreshold,
+    })
+    .from(productVariants)
+    .innerJoin(products, eq(productVariants.productId, products.id))
+    .where(
+      and(
+        eq(productVariants.tenantId, tenantId),
+        eq(productVariants.isActive, true),
+        isNull(products.deletedAt),
+        eq(products.isArchived, false),
+      ),
+    )
+    .orderBy(asc(products.name), asc(productVariants.sku))
+    .limit(limit)
+    .offset(offset);
+
+  const [totalResult] = await db
+    .select({ total: count() })
+    .from(productVariants)
+    .innerJoin(products, eq(productVariants.productId, products.id))
+    .where(
+      and(
+        eq(productVariants.tenantId, tenantId),
+        eq(productVariants.isActive, true),
+        isNull(products.deletedAt),
+        eq(products.isArchived, false),
+      ),
+    );
+
+  // Add computed values
+  const enriched = data.map((row) => ({
+    ...row,
+    stockValueAtCost: Number(row.weightedAvgCost) * row.availableQuantity,
+    stockValueAtMrp: Number(row.mrp) * row.availableQuantity,
+  }));
+
+  return { data: enriched, total: totalResult?.total ?? 0, page, limit };
+}
+
+export async function getInventoryValuation(tenantId: string) {
+  const [result] = await db.execute(sql`
+    SELECT
+      COUNT(pv.id)::int as total_variants,
+      COALESCE(SUM(pv.available_quantity), 0)::int as total_units,
+      COALESCE(SUM(pv.available_quantity * pv.weighted_avg_cost::numeric), 0) as value_at_cost,
+      COALESCE(SUM(pv.available_quantity * pv.mrp::numeric), 0) as value_at_mrp
+    FROM product_variants pv
+    INNER JOIN products p ON pv.product_id = p.id
+    WHERE pv.tenant_id = ${tenantId}
+      AND pv.is_active = true
+      AND p.deleted_at IS NULL
+      AND p.is_archived = false
+      AND pv.available_quantity > 0
+  `);
+
+  return {
+    totalVariants: Number((result as any)?.total_variants ?? 0),
+    totalUnits: Number((result as any)?.total_units ?? 0),
+    valueAtCost: Number((result as any)?.value_at_cost ?? 0),
+    valueAtMrp: Number((result as any)?.value_at_mrp ?? 0),
+  };
+}
+
+export async function getDeadStock(tenantId: string, thresholdDaysOverride?: number) {
+  const [settings] = await db
+    .select({ threshold: tenantSettings.shelfAgingThresholdDays })
+    .from(tenantSettings)
+    .where(eq(tenantSettings.tenantId, tenantId));
+  const thresholdDays = thresholdDaysOverride ?? settings?.threshold ?? 90;
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - thresholdDays);
+
+  const data = await db.execute(sql`
+    SELECT
+      pv.id as variant_id,
+      pv.product_id,
+      pv.sku,
+      pv.available_quantity,
+      pv.weighted_avg_cost,
+      pv.mrp,
+      p.name as product_name,
+      MIN(im.created_at) as oldest_stock_date,
+      EXTRACT(DAY FROM NOW() - MIN(im.created_at))::int as age_days,
+      (pv.available_quantity * pv.weighted_avg_cost::numeric) as capital_locked
+    FROM product_variants pv
+    INNER JOIN products p ON pv.product_id = p.id
+    INNER JOIN inventory_movements im ON im.variant_id = pv.id
+      AND im.movement_type IN ('purchase', 'opening_balance')
+    WHERE pv.tenant_id = ${tenantId}
+      AND pv.is_active = true
+      AND pv.available_quantity > 0
+      AND p.deleted_at IS NULL
+      AND p.is_archived = false
+    GROUP BY pv.id, pv.product_id, pv.sku, pv.available_quantity, pv.weighted_avg_cost, pv.mrp, p.name
+    HAVING MIN(im.created_at) < ${cutoff.toISOString()}::timestamptz
+    ORDER BY MIN(im.created_at) ASC
+  `);
+
+  return {
+    thresholdDays,
+    items: (data as any[]).map((r: any) => ({
+      variantId: r.variant_id,
+      productId: r.product_id,
+      productName: r.product_name,
+      sku: r.sku,
+      availableQuantity: Number(r.available_quantity),
+      weightedAvgCost: Number(r.weighted_avg_cost),
+      mrp: Number(r.mrp),
+      ageDays: Number(r.age_days),
+      capitalLocked: Number(r.capital_locked),
+      oldestStockDate: r.oldest_stock_date,
+    })),
+  };
+}
+
+export async function getLowStockReport(tenantId: string) {
+  const data = await db
+    .select({
+      variantId: productVariants.id,
+      productId: productVariants.productId,
+      productName: products.name,
+      sku: productVariants.sku,
+      availableQuantity: productVariants.availableQuantity,
+      lowStockThreshold: productVariants.lowStockThreshold,
+      mrp: productVariants.mrp,
+      weightedAvgCost: productVariants.weightedAvgCost,
+    })
+    .from(productVariants)
+    .innerJoin(products, eq(productVariants.productId, products.id))
+    .where(
+      and(
+        eq(productVariants.tenantId, tenantId),
+        eq(productVariants.isActive, true),
+        sql`${productVariants.lowStockThreshold} IS NOT NULL`,
+        sql`${productVariants.availableQuantity} <= ${productVariants.lowStockThreshold}`,
+        isNull(products.deletedAt),
+        eq(products.isArchived, false),
+      ),
+    )
+    .orderBy(asc(productVariants.availableQuantity));
+
+  return { data, count: data.length };
+}
+
+// ──────────────── Purchase Reports (M15) ────────────────
+
+export async function getSupplierPurchases(
+  tenantId: string,
+  opts?: { from?: string; to?: string },
+) {
+  const conditions = [`gr.tenant_id = '${tenantId}'`];
+  if (opts?.from) conditions.push(`gr.created_at >= '${opts.from}'::timestamptz`);
+  if (opts?.to) conditions.push(`gr.created_at <= '${opts.to}'::timestamptz`);
+
+  const data = await db.execute(sql.raw(`
+    SELECT
+      s.id as supplier_id,
+      s.name as supplier_name,
+      COUNT(gr.id)::int as receipt_count,
+      COALESCE(SUM(gr.total_amount::numeric), 0) as total_purchases,
+      s.outstanding_balance::numeric as outstanding_balance
+    FROM suppliers s
+    LEFT JOIN goods_receipts gr ON gr.supplier_id = s.id AND ${conditions.join(' AND ')}
+    WHERE s.tenant_id = '${tenantId}' AND s.deleted_at IS NULL
+    GROUP BY s.id, s.name, s.outstanding_balance
+    ORDER BY total_purchases DESC
+  `));
+
+  return {
+    data: (data as any[]).map((r: any) => ({
+      supplierId: r.supplier_id,
+      supplierName: r.supplier_name,
+      receiptCount: Number(r.receipt_count),
+      totalPurchases: Number(r.total_purchases),
+      outstandingBalance: Number(r.outstanding_balance),
+    })),
+  };
+}
+
+export async function getPurchaseSummary(
+  tenantId: string,
+  opts?: { from?: string; to?: string },
+) {
+  const conditions = [`tenant_id = '${tenantId}'`];
+  if (opts?.from) conditions.push(`created_at >= '${opts.from}'::timestamptz`);
+  if (opts?.to) conditions.push(`created_at <= '${opts.to}'::timestamptz`);
+
+  const [summary] = await db.execute(sql.raw(`
+    SELECT
+      COUNT(*)::int as total_receipts,
+      COALESCE(SUM(total_amount::numeric), 0) as total_amount,
+      COALESCE(SUM(total_gst::numeric), 0) as total_gst,
+      COALESCE(SUM(amount_paid::numeric), 0) as total_paid
+    FROM goods_receipts
+    WHERE ${conditions.join(' AND ')}
+  `));
+
+  return {
+    totalReceipts: Number((summary as any)?.total_receipts ?? 0),
+    totalAmount: Number((summary as any)?.total_amount ?? 0),
+    totalGst: Number((summary as any)?.total_gst ?? 0),
+    totalPaid: Number((summary as any)?.total_paid ?? 0),
+    totalCredit: Number((summary as any)?.total_amount ?? 0) - Number((summary as any)?.total_paid ?? 0),
+  };
+}
+
+// ──────────────── Sales Reports (M18b) ────────────────
+
+function dateFilter(from?: string, to?: string): string {
+  const parts: string[] = [];
+  if (from) parts.push(`AND s.created_at >= '${from}'::timestamptz`);
+  if (to) parts.push(`AND s.created_at <= '${to}'::timestamptz`);
+  return parts.join(' ');
+}
+
+export async function getSalesSummary(tenantId: string, opts?: { from?: string; to?: string }) {
+  const df = dateFilter(opts?.from, opts?.to);
+  const [result] = await db.execute(sql.raw(`
+    SELECT
+      COUNT(*)::int as transaction_count,
+      COALESCE(SUM(net_payable::numeric), 0) as revenue,
+      COALESCE(SUM(total_cogs::numeric), 0) as cogs,
+      COALESCE(SUM(net_payable::numeric) - SUM(total_cogs::numeric), 0) as gross_profit,
+      CASE WHEN SUM(net_payable::numeric) > 0
+        THEN ROUND((SUM(net_payable::numeric) - SUM(total_cogs::numeric)) / SUM(net_payable::numeric) * 100, 2)
+        ELSE 0 END as gross_margin_pct
+    FROM sales s WHERE s.tenant_id = '${tenantId}' AND s.status = 'completed' ${df}
+  `));
+  return {
+    transactionCount: Number((result as any)?.transaction_count ?? 0),
+    revenue: Number((result as any)?.revenue ?? 0),
+    cogs: Number((result as any)?.cogs ?? 0),
+    grossProfit: Number((result as any)?.gross_profit ?? 0),
+    grossMarginPct: Number((result as any)?.gross_margin_pct ?? 0),
+  };
+}
+
+export async function getSalesByCategory(tenantId: string, opts?: { from?: string; to?: string }) {
+  const df = dateFilter(opts?.from, opts?.to);
+  const data = await db.execute(sql.raw(`
+    SELECT c.name as category, SUM(si.quantity)::int as qty, COALESCE(SUM(si.line_total::numeric), 0) as revenue
+    FROM sale_items si
+    INNER JOIN sales s ON si.sale_id = s.id
+    LEFT JOIN product_variants pv ON si.variant_id = pv.id
+    LEFT JOIN products p ON pv.product_id = p.id
+    LEFT JOIN categories c ON p.category_id = c.id
+    WHERE s.tenant_id = '${tenantId}' AND s.status = 'completed' ${df}
+    GROUP BY c.name ORDER BY revenue DESC
+  `));
+  return { data: (data as any[]).map((r: any) => ({ category: r.category ?? 'Unknown', qty: Number(r.qty), revenue: Number(r.revenue) })) };
+}
+
+export async function getSalesByProduct(tenantId: string, opts?: { from?: string; to?: string }) {
+  const df = dateFilter(opts?.from, opts?.to);
+  const data = await db.execute(sql.raw(`
+    SELECT si.product_name, SUM(si.quantity)::int as qty,
+      COALESCE(SUM(si.line_total::numeric), 0) as revenue,
+      COALESCE(SUM(si.cost_at_sale::numeric * si.quantity), 0) as cogs,
+      COALESCE(SUM(si.line_total::numeric) - SUM(si.cost_at_sale::numeric * si.quantity), 0) as profit
+    FROM sale_items si INNER JOIN sales s ON si.sale_id = s.id
+    WHERE s.tenant_id = '${tenantId}' AND s.status = 'completed' ${df}
+    GROUP BY si.product_name ORDER BY revenue DESC
+  `));
+  return { data: (data as any[]).map((r: any) => ({ productName: r.product_name, qty: Number(r.qty), revenue: Number(r.revenue), cogs: Number(r.cogs), profit: Number(r.profit) })) };
+}
+
+export async function getSalesByBrand(tenantId: string, opts?: { from?: string; to?: string }) {
+  const df = dateFilter(opts?.from, opts?.to);
+  const data = await db.execute(sql.raw(`
+    SELECT COALESCE(b.name, 'No Brand') as brand, SUM(si.quantity)::int as qty, COALESCE(SUM(si.line_total::numeric), 0) as revenue
+    FROM sale_items si INNER JOIN sales s ON si.sale_id = s.id
+    LEFT JOIN product_variants pv ON si.variant_id = pv.id
+    LEFT JOIN products p ON pv.product_id = p.id LEFT JOIN brands b ON p.brand_id = b.id
+    WHERE s.tenant_id = '${tenantId}' AND s.status = 'completed' ${df}
+    GROUP BY b.name ORDER BY revenue DESC
+  `));
+  return { data: (data as any[]).map((r: any) => ({ brand: r.brand, qty: Number(r.qty), revenue: Number(r.revenue) })) };
+}
+
+export async function getSalesTrend(tenantId: string, opts?: { from?: string; to?: string }) {
+  const df = dateFilter(opts?.from, opts?.to);
+  const data = await db.execute(sql.raw(`
+    SELECT DATE(s.created_at) as date, COUNT(*)::int as transactions, COALESCE(SUM(net_payable::numeric), 0) as revenue
+    FROM sales s WHERE s.tenant_id = '${tenantId}' AND s.status = 'completed' ${df}
+    GROUP BY DATE(s.created_at) ORDER BY date ASC
+  `));
+  return { data: (data as any[]).map((r: any) => ({ date: r.date, transactions: Number(r.transactions), revenue: Number(r.revenue) })) };
+}
+
+// ──────────────── Profit Reports ────────────────
+
+export async function getProfitMargins(tenantId: string, opts?: { from?: string; to?: string }) {
+  const df = dateFilter(opts?.from, opts?.to);
+  const data = await db.execute(sql.raw(`
+    SELECT si.product_name, si.variant_description as variant,
+      ROUND(AVG(si.unit_price::numeric), 2) as avg_selling_price,
+      ROUND(AVG(si.cost_at_sale::numeric), 2) as avg_cost,
+      ROUND(AVG(si.unit_price::numeric) - AVG(si.cost_at_sale::numeric), 2) as avg_profit,
+      CASE WHEN AVG(si.unit_price::numeric) > 0
+        THEN ROUND((AVG(si.unit_price::numeric) - AVG(si.cost_at_sale::numeric)) / AVG(si.unit_price::numeric) * 100, 2)
+        ELSE 0 END as margin_pct,
+      SUM(si.quantity)::int as total_qty
+    FROM sale_items si INNER JOIN sales s ON si.sale_id = s.id
+    WHERE s.tenant_id = '${tenantId}' AND s.status = 'completed' ${df}
+    GROUP BY si.product_name, si.variant_description ORDER BY margin_pct DESC
+  `));
+  return { data: (data as any[]).map((r: any) => ({ productName: r.product_name, variant: r.variant, avgSellingPrice: Number(r.avg_selling_price), avgCost: Number(r.avg_cost), avgProfit: Number(r.avg_profit), marginPct: Number(r.margin_pct), totalQty: Number(r.total_qty) })) };
+}
+
+export async function getPnl(tenantId: string, opts?: { from?: string; to?: string }) {
+  const sales = await getSalesSummary(tenantId, opts);
+
+  const expenseConditions = [`tenant_id = '${tenantId}'`, `deleted_at IS NULL`];
+  if (opts?.from) expenseConditions.push(`date >= '${opts.from}'`);
+  if (opts?.to) expenseConditions.push(`date <= '${opts.to}'`);
+
+  const [expenseResult] = await db.execute(sql.raw(`
+    SELECT COALESCE(SUM(amount::numeric), 0) as total_expenses
+    FROM expenses WHERE ${expenseConditions.join(' AND ')}
+  `));
+
+  const totalExpenses = Number((expenseResult as any)?.total_expenses ?? 0);
+  const netProfit = sales.grossProfit - totalExpenses;
+
+  return {
+    revenue: sales.revenue,
+    cogs: sales.cogs,
+    grossProfit: sales.grossProfit,
+    grossMarginPct: sales.grossMarginPct,
     totalExpenses,
     netProfit,
+    netMarginPct: sales.revenue > 0 ? Math.round((netProfit / sales.revenue) * 10000) / 100 : 0,
   };
 }
 
-// ---------- 12. Purchase Summary ----------
-
-async function purchaseSummaryReport(tenantId: string, params: ReportParams) {
-  const { from, to } = params;
-  const rows = await db.execute(
-    sql.raw(`
-    SELECT s.id AS supplier_id, s.name AS supplier_name,
-           COALESCE(SUM(CAST(p.total_amount AS numeric)), 0) AS total_purchased,
-           COUNT(*)::int AS purchase_count
-    FROM purchases p
-    JOIN suppliers s ON p.supplier_id = s.id
-    WHERE p.tenant_id = '${tenantId}'
-      ${dateFilter(from, to, 'p.created_at')}
-    GROUP BY s.id, s.name
-    ORDER BY total_purchased DESC
-  `),
-  );
-  return { rows };
+export async function getDiscountImpact(tenantId: string, opts?: { from?: string; to?: string }) {
+  const df = dateFilter(opts?.from, opts?.to);
+  const [result] = await db.execute(sql.raw(`
+    SELECT
+      COALESCE(SUM(subtotal_mrp::numeric), 0) as total_mrp,
+      COALESCE(SUM(product_discount_total::numeric), 0) as product_discounts,
+      COALESCE(SUM(bill_discount_amount::numeric), 0) as bill_discounts,
+      COALESCE(SUM(bargain_adjustment::numeric), 0) as bargain_adjustments,
+      COALESCE(SUM(net_payable::numeric), 0) as actual_revenue
+    FROM sales s WHERE s.tenant_id = '${tenantId}' AND s.status = 'completed' ${df}
+  `));
+  const totalMrp = Number((result as any)?.total_mrp ?? 0);
+  const totalDiscounts = Number((result as any)?.product_discounts ?? 0) + Number((result as any)?.bill_discounts ?? 0) + Number((result as any)?.bargain_adjustments ?? 0);
+  return {
+    totalMrp,
+    productDiscounts: Number((result as any)?.product_discounts ?? 0),
+    billDiscounts: Number((result as any)?.bill_discounts ?? 0),
+    bargainAdjustments: Number((result as any)?.bargain_adjustments ?? 0),
+    totalDiscounts,
+    actualRevenue: Number((result as any)?.actual_revenue ?? 0),
+    discountPctOfMrp: totalMrp > 0 ? Math.round((totalDiscounts / totalMrp) * 10000) / 100 : 0,
+  };
 }
 
-// ---------- 13. Expense Report ----------
+// ──────────────── Credit Reports ────────────────
 
-async function expenseReport(tenantId: string, params: ReportParams) {
-  const { from, to } = params;
-  const rows = await db.execute(
-    sql.raw(`
-    SELECT category,
-           COALESCE(SUM(CAST(amount AS numeric)), 0) AS total_amount,
-           COUNT(*)::int AS entry_count
-    FROM expenses
-    WHERE tenant_id = '${tenantId}'
-      ${dateFilter(from, to, 'expense_date')}
-    GROUP BY category
-    ORDER BY total_amount DESC
-  `),
-  );
-  return { rows };
+export async function getCustomerOutstanding(tenantId: string) {
+  const data = await db.execute(sql.raw(`
+    SELECT id, name, phone, outstanding_balance::numeric as balance
+    FROM customers WHERE tenant_id = '${tenantId}' AND deleted_at IS NULL AND outstanding_balance::numeric > 0
+    ORDER BY balance DESC
+  `));
+  return { data: (data as any[]).map((r: any) => ({ id: r.id, name: r.name, phone: r.phone, balance: Number(r.balance) })) };
 }
 
-// ---------- 14. GST Summary ----------
+export async function getSupplierOutstanding(tenantId: string) {
+  const data = await db.execute(sql.raw(`
+    SELECT id, name, phone, outstanding_balance::numeric as balance
+    FROM suppliers WHERE tenant_id = '${tenantId}' AND deleted_at IS NULL AND outstanding_balance::numeric > 0
+    ORDER BY balance DESC
+  `));
+  return { data: (data as any[]).map((r: any) => ({ id: r.id, name: r.name, phone: r.phone, balance: Number(r.balance) })) };
+}
 
-async function gstSummaryReport(tenantId: string, params: ReportParams) {
-  const { from, to } = params;
+export async function getCreditAging(tenantId: string) {
+  // Reuse from credit service logic
+  const { getCustomerKhataSummary, getSupplierPayablesSummary } = await import('./credit.service.js');
+  const customerSummary = await getCustomerKhataSummary(tenantId);
+  const supplierSummary = await getSupplierPayablesSummary(tenantId);
+  return { customers: customerSummary.aging, suppliers: supplierSummary.aging };
+}
 
-  const [outputTax, inputTax] = await Promise.all([
-    // Output tax from sales
-    db.execute(
-      sql.raw(`
-      SELECT COALESCE(SUM(CAST(bi.cgst_amount AS numeric)), 0) AS total_cgst,
-             COALESCE(SUM(CAST(bi.sgst_amount AS numeric)), 0) AS total_sgst,
-             COALESCE(SUM(CAST(bi.cgst_amount AS numeric) + CAST(bi.sgst_amount AS numeric)), 0) AS total_output_tax
-      FROM bill_items bi
-      JOIN bills b ON bi.bill_id = b.id
-      WHERE b.tenant_id = '${tenantId}'
-        AND b.status IN ('completed', 'partially_returned')
-        ${dateFilter(from, to, 'b.created_at')}
-    `),
-    ),
-    // Input tax from purchases
-    db.execute(
-      sql.raw(`
-      SELECT COALESCE(SUM(CAST(cgst_amount AS numeric)), 0) AS total_cgst,
-             COALESCE(SUM(CAST(sgst_amount AS numeric)), 0) AS total_sgst,
-             COALESCE(SUM(CAST(igst_amount AS numeric)), 0) AS total_igst,
-             COALESCE(SUM(CAST(cgst_amount AS numeric) + CAST(sgst_amount AS numeric) + CAST(igst_amount AS numeric)), 0) AS total_input_tax
-      FROM purchases
-      WHERE tenant_id = '${tenantId}'
-        ${dateFilter(from, to, 'created_at')}
-    `),
-    ),
-  ]);
+export async function getPaymentCollections(tenantId: string, opts?: { from?: string; to?: string }) {
+  const conditions = [`ct.tenant_id = '${tenantId}'`, `ct.type = 'payment'`];
+  if (opts?.from) conditions.push(`ct.created_at >= '${opts.from}'::timestamptz`);
+  if (opts?.to) conditions.push(`ct.created_at <= '${opts.to}'::timestamptz`);
 
-  const output = (outputTax as any[])[0] ?? {};
-  const input = (inputTax as any[])[0] ?? {};
-  const outputTotal = Number(output.total_output_tax ?? 0);
-  const inputTotal = Number(input.total_input_tax ?? 0);
+  const data = await db.execute(sql.raw(`
+    SELECT ct.customer_id, c.name, c.phone,
+      COUNT(*)::int as payment_count,
+      COALESCE(SUM(ABS(ct.amount::numeric)), 0) as total_collected
+    FROM customer_transactions ct
+    INNER JOIN customers c ON ct.customer_id = c.id
+    WHERE ${conditions.join(' AND ')}
+    GROUP BY ct.customer_id, c.name, c.phone
+    ORDER BY total_collected DESC
+  `));
+  return { data: (data as any[]).map((r: any) => ({ customerId: r.customer_id, name: r.name, phone: r.phone, paymentCount: Number(r.payment_count), totalCollected: Number(r.total_collected) })) };
+}
+
+// ──────────────── Staff Reports ────────────────
+
+export async function getStaffActivity(tenantId: string, opts?: { from?: string; to?: string }) {
+  const df = dateFilter(opts?.from, opts?.to);
+  // Billing activity
+  const billingData = await db.execute(sql.raw(`
+    SELECT u.name, u.role, COUNT(*)::int as bills, COALESCE(SUM(s.net_payable::numeric), 0) as revenue
+    FROM sales s INNER JOIN users u ON s.billed_by = u.id
+    WHERE s.tenant_id = '${tenantId}' AND s.status = 'completed' ${df}
+    GROUP BY u.name, u.role ORDER BY revenue DESC
+  `));
+
+  // Stock activity (inventory movements by user)
+  const stockConditions = [`im.tenant_id = '${tenantId}'`];
+  if (opts?.from) stockConditions.push(`im.created_at >= '${opts.from}'::timestamptz`);
+  if (opts?.to) stockConditions.push(`im.created_at <= '${opts.to}'::timestamptz`);
+
+  const stockData = await db.execute(sql.raw(`
+    SELECT u.name, u.role, COUNT(*)::int as stock_entries
+    FROM inventory_movements im INNER JOIN users u ON im.created_by = u.id
+    WHERE ${stockConditions.join(' AND ')}
+    GROUP BY u.name, u.role ORDER BY stock_entries DESC
+  `));
 
   return {
-    outputTax: {
-      cgst: Number(output.total_cgst ?? 0),
-      sgst: Number(output.total_sgst ?? 0),
-      total: outputTotal,
-    },
-    inputTax: {
-      cgst: Number(input.total_cgst ?? 0),
-      sgst: Number(input.total_sgst ?? 0),
-      igst: Number(input.total_igst ?? 0),
-      total: inputTotal,
-    },
-    netLiability: outputTotal - inputTotal,
+    billing: (billingData as any[]).map((r: any) => ({ name: r.name, role: r.role, bills: Number(r.bills), revenue: Number(r.revenue) })),
+    stock: (stockData as any[]).map((r: any) => ({ name: r.name, role: r.role, stockEntries: Number(r.stock_entries) })),
   };
 }
 
-// ---------- 15. Bargain / Additional Discount Report ----------
+// ──────────────── Expense Report ────────────────
 
-async function bargainDiscountReport(tenantId: string, params: ReportParams) {
-  const { from, to } = params;
-  const rows = await db.execute(
-    sql.raw(`
-    SELECT b.salesperson_id,
-           u.name AS salesperson_name,
-           COALESCE(SUM(CAST(b.additional_discount_amount AS numeric)), 0) AS total_discount_given,
-           COUNT(*)::int AS bill_count
-    FROM bills b
-    JOIN users u ON b.salesperson_id = u.id
-    WHERE b.tenant_id = '${tenantId}'
-      AND b.status IN ('completed', 'partially_returned')
-      AND CAST(b.additional_discount_amount AS numeric) > 0
-      ${dateFilter(from, to, 'b.created_at')}
-    GROUP BY b.salesperson_id, u.name
-    ORDER BY total_discount_given DESC
-  `),
-  );
-  return { rows };
+export async function getExpenseSummary(tenantId: string, opts?: { from?: string; to?: string }) {
+  const conditions = [`e.tenant_id = '${tenantId}'`, `e.deleted_at IS NULL`];
+  if (opts?.from) conditions.push(`e.date >= '${opts.from}'`);
+  if (opts?.to) conditions.push(`e.date <= '${opts.to}'`);
+
+  const data = await db.execute(sql.raw(`
+    SELECT ec.name as category, COUNT(*)::int as count, COALESCE(SUM(e.amount::numeric), 0) as total
+    FROM expenses e LEFT JOIN expense_categories ec ON e.category_id = ec.id
+    WHERE ${conditions.join(' AND ')}
+    GROUP BY ec.name ORDER BY total DESC
+  `));
+
+  const [totals] = await db.execute(sql.raw(`
+    SELECT COALESCE(SUM(amount::numeric), 0) as total
+    FROM expenses e WHERE ${conditions.join(' AND ')}
+  `));
+
+  return {
+    total: Number((totals as any)?.total ?? 0),
+    byCategory: (data as any[]).map((r: any) => ({ category: r.category ?? 'Uncategorized', count: Number(r.count), total: Number(r.total) })),
+  };
 }
 
-// ---------- 16. Aging Inventory ----------
+// ──────────────── GST Reports ────────────────
 
-async function agingInventoryReport(tenantId: string, _params: ReportParams) {
-  const rows = await db.execute(
-    sql.raw(`
-    SELECT p.id, p.name, p.sku, p.current_stock,
-           CAST(p.cost_price AS numeric) AS unit_cost,
-           (p.current_stock * CAST(p.cost_price AS numeric)) AS stock_value,
-           c.name AS category_name,
-           MAX(se.created_at) AS last_sale_date,
-           EXTRACT(DAY FROM NOW() - COALESCE(MAX(se.created_at), p.created_at))::int AS days_since_last_sale
-    FROM products p
-    LEFT JOIN categories c ON p.category_id = c.id
-    LEFT JOIN stock_entries se ON se.product_id = p.id
-      AND se.tenant_id = '${tenantId}' AND se.type = 'sale'
-    WHERE p.tenant_id = '${tenantId}'
-      AND p.is_active = true
-      AND p.current_stock > 0
-    GROUP BY p.id, p.name, p.sku, p.current_stock, p.cost_price, p.created_at, c.name
-    HAVING NOT EXISTS (
-      SELECT 1 FROM stock_entries se2
-      WHERE se2.product_id = p.id AND se2.tenant_id = '${tenantId}'
-        AND se2.type = 'sale' AND se2.created_at >= NOW() - INTERVAL '90 days'
-    )
-    ORDER BY days_since_last_sale DESC
-  `),
-  );
-  return { rows };
+export async function getGstSummary(tenantId: string, opts?: { from?: string; to?: string }) {
+  const df = dateFilter(opts?.from, opts?.to);
+  const [result] = await db.execute(sql.raw(`
+    SELECT
+      COALESCE(SUM(subtotal_taxable::numeric), 0) as taxable_turnover,
+      COALESCE(SUM(total_cgst::numeric), 0) as total_cgst,
+      COALESCE(SUM(total_sgst::numeric), 0) as total_sgst,
+      COALESCE(SUM(total_igst::numeric), 0) as total_igst,
+      COALESCE(SUM(net_payable::numeric), 0) as total_revenue
+    FROM sales s WHERE s.tenant_id = '${tenantId}' AND s.status = 'completed' ${df}
+  `));
+
+  const [tenant] = await db.select({ gstScheme: tenants.gstScheme }).from(tenants).where(eq(tenants.id, tenantId));
+
+  return {
+    gstScheme: tenant?.gstScheme ?? 'composite',
+    taxableTurnover: Number((result as any)?.taxable_turnover ?? 0),
+    totalCgst: Number((result as any)?.total_cgst ?? 0),
+    totalSgst: Number((result as any)?.total_sgst ?? 0),
+    totalIgst: Number((result as any)?.total_igst ?? 0),
+    totalRevenue: Number((result as any)?.total_revenue ?? 0),
+  };
 }
 
-// ---------- 17. Dead Stock ----------
+export async function getHsnSummary(tenantId: string, opts?: { from?: string; to?: string }) {
+  const df = dateFilter(opts?.from, opts?.to);
+  const data = await db.execute(sql.raw(`
+    SELECT COALESCE(si.hsn_code, 'N/A') as hsn_code,
+      SUM(si.quantity)::int as qty,
+      COALESCE(SUM(si.line_total::numeric), 0) as taxable_value,
+      COALESCE(SUM(si.cgst_amount::numeric), 0) as cgst,
+      COALESCE(SUM(si.sgst_amount::numeric), 0) as sgst,
+      COALESCE(SUM(si.igst_amount::numeric), 0) as igst
+    FROM sale_items si INNER JOIN sales s ON si.sale_id = s.id
+    WHERE s.tenant_id = '${tenantId}' AND s.status = 'completed' ${df}
+    GROUP BY si.hsn_code ORDER BY taxable_value DESC
+  `));
+  return { data: (data as any[]).map((r: any) => ({ hsnCode: r.hsn_code, qty: Number(r.qty), taxableValue: Number(r.taxable_value), cgst: Number(r.cgst), sgst: Number(r.sgst), igst: Number(r.igst) })) };
+}
 
-async function deadStockReport(tenantId: string, params: ReportParams) {
-  const { from, to } = params;
-  // Default date range: last 180 days if not specified
-  const fromDate =
-    from ?? new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const toDate = to ?? new Date().toISOString().slice(0, 10);
+// ──────────────── GST Return Exports (M21) ────────────────
 
-  const rows = await db.execute(
-    sql.raw(`
-    SELECT p.id, p.name, p.sku, p.current_stock,
-           CAST(p.cost_price AS numeric) AS unit_cost,
-           (p.current_stock * CAST(p.cost_price AS numeric)) AS stock_value,
-           c.name AS category_name
-    FROM products p
-    LEFT JOIN categories c ON p.category_id = c.id
-    WHERE p.tenant_id = '${tenantId}'
-      AND p.is_active = true
-      AND p.current_stock > 0
-      AND NOT EXISTS (
-        SELECT 1 FROM bill_items bi
-        JOIN bills b ON bi.bill_id = b.id
-        WHERE bi.product_id = p.id
-          AND b.tenant_id = '${tenantId}'
-          AND b.status IN ('completed', 'partially_returned')
-          AND b.created_at >= '${fromDate}'
-          AND b.created_at <= '${toDate}'
-      )
-    ORDER BY stock_value DESC
-  `),
-  );
-  return { rows };
+function toCsvString(headers: string[], rows: string[][]): string {
+  const lines = [headers.join(',')];
+  for (const row of rows) {
+    lines.push(row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','));
+  }
+  return lines.join('\n');
+}
+
+/**
+ * GSTR-1: Outward supply details
+ * B2B invoices (customer GSTIN), B2C consolidated
+ */
+export async function getGstr1Export(tenantId: string, opts?: { from?: string; to?: string }) {
+  const df = dateFilter(opts?.from, opts?.to);
+
+  // B2B: Sales to customers with GSTIN
+  const b2b = await db.execute(sql.raw(`
+    SELECT s.bill_number, s.created_at as invoice_date, c.gstin as customer_gstin, c.name as customer_name,
+      s.subtotal_taxable::numeric as taxable_value, s.total_cgst::numeric as cgst,
+      s.total_sgst::numeric as sgst, s.total_igst::numeric as igst, s.net_payable::numeric as total
+    FROM sales s INNER JOIN customers c ON s.customer_id = c.id
+    WHERE s.tenant_id = '${tenantId}' AND s.status = 'completed' AND s.gst_scheme = 'regular'
+      AND c.gstin IS NOT NULL AND c.gstin != '' ${df}
+    ORDER BY s.created_at
+  `));
+
+  // B2C: Sales to customers without GSTIN
+  const [b2c] = await db.execute(sql.raw(`
+    SELECT COUNT(*)::int as invoice_count,
+      COALESCE(SUM(subtotal_taxable::numeric), 0) as taxable_value,
+      COALESCE(SUM(total_cgst::numeric), 0) as cgst,
+      COALESCE(SUM(total_sgst::numeric), 0) as sgst,
+      COALESCE(SUM(net_payable::numeric), 0) as total
+    FROM sales s INNER JOIN customers c ON s.customer_id = c.id
+    WHERE s.tenant_id = '${tenantId}' AND s.status = 'completed' AND s.gst_scheme = 'regular'
+      AND (c.gstin IS NULL OR c.gstin = '') ${df}
+  `));
+
+  // Generate CSV
+  const b2bHeaders = ['Invoice Number', 'Invoice Date', 'Customer GSTIN', 'Customer Name', 'Taxable Value', 'CGST', 'SGST', 'IGST', 'Invoice Value'];
+  const b2bRows = (b2b as any[]).map((r: any) => [
+    r.bill_number, new Date(r.invoice_date).toISOString().split('T')[0],
+    r.customer_gstin, r.customer_name,
+    String(Number(r.taxable_value)), String(Number(r.cgst)), String(Number(r.sgst)), String(Number(r.igst)), String(Number(r.total)),
+  ]);
+
+  const csv = toCsvString(b2bHeaders, b2bRows);
+  const b2cSummary = {
+    invoiceCount: Number((b2c as any)?.invoice_count ?? 0),
+    taxableValue: Number((b2c as any)?.taxable_value ?? 0),
+    cgst: Number((b2c as any)?.cgst ?? 0),
+    sgst: Number((b2c as any)?.sgst ?? 0),
+    total: Number((b2c as any)?.total ?? 0),
+  };
+
+  return { csv, b2bCount: b2bRows.length, b2cSummary };
+}
+
+/**
+ * GSTR-3B: Summary return
+ */
+export async function getGstr3bExport(tenantId: string, opts?: { from?: string; to?: string }) {
+  const df = dateFilter(opts?.from, opts?.to);
+
+  const [outward] = await db.execute(sql.raw(`
+    SELECT COALESCE(SUM(subtotal_taxable::numeric), 0) as taxable_value,
+      COALESCE(SUM(total_cgst::numeric), 0) as cgst,
+      COALESCE(SUM(total_sgst::numeric), 0) as sgst,
+      COALESCE(SUM(total_igst::numeric), 0) as igst
+    FROM sales s WHERE s.tenant_id = '${tenantId}' AND s.status = 'completed' AND s.gst_scheme = 'regular' ${df}
+  `));
+
+  // Input tax (from purchases under regular scheme)
+  const [input] = await db.execute(sql.raw(`
+    SELECT COALESCE(SUM(total_gst::numeric), 0) as input_tax
+    FROM goods_receipts WHERE tenant_id = '${tenantId}'
+      ${opts?.from ? `AND created_at >= '${opts.from}'::timestamptz` : ''}
+      ${opts?.to ? `AND created_at <= '${opts.to}'::timestamptz` : ''}
+  `));
+
+  const outwardTax = Number((outward as any)?.cgst ?? 0) + Number((outward as any)?.sgst ?? 0) + Number((outward as any)?.igst ?? 0);
+  const inputTax = Number((input as any)?.input_tax ?? 0);
+
+  const headers = ['Description', 'Taxable Value', 'CGST', 'SGST', 'IGST', 'Total Tax'];
+  const rows = [
+    ['Outward Supplies', String(Number((outward as any)?.taxable_value ?? 0)), String(Number((outward as any)?.cgst ?? 0)), String(Number((outward as any)?.sgst ?? 0)), String(Number((outward as any)?.igst ?? 0)), String(outwardTax)],
+    ['Input Tax Credit', '', '', '', '', String(inputTax)],
+    ['Net Tax Payable', '', '', '', '', String(outwardTax - inputTax)],
+  ];
+
+  return {
+    csv: toCsvString(headers, rows),
+    summary: {
+      outwardTaxableValue: Number((outward as any)?.taxable_value ?? 0),
+      outwardTax,
+      inputTax,
+      netTaxPayable: outwardTax - inputTax,
+    },
+  };
+}
+
+/**
+ * CMP-08: Composite scheme quarterly statement
+ */
+export async function getCmp08Export(tenantId: string, opts?: { from?: string; to?: string }) {
+  const df = dateFilter(opts?.from, opts?.to);
+
+  const [result] = await db.execute(sql.raw(`
+    SELECT COALESCE(SUM(net_payable::numeric), 0) as turnover
+    FROM sales s WHERE s.tenant_id = '${tenantId}' AND s.status = 'completed' ${df}
+  `));
+
+  const turnover = Number((result as any)?.turnover ?? 0);
+  const taxRate = 1; // 1% for traders under Composite
+  const taxPayable = Math.round(turnover * taxRate) / 100;
+  const cgst = Math.round(taxPayable * 50) / 100; // 0.5% CGST
+  const sgst = Math.round(taxPayable * 50) / 100; // 0.5% SGST
+
+  const headers = ['Description', 'Amount'];
+  const rows = [
+    ['Total Turnover', String(turnover)],
+    ['Tax Rate', `${taxRate}%`],
+    ['CGST (0.5%)', String(cgst)],
+    ['SGST (0.5%)', String(sgst)],
+    ['Total Tax Payable', String(taxPayable)],
+  ];
+
+  return {
+    csv: toCsvString(headers, rows),
+    summary: { turnover, taxRate, cgst, sgst, taxPayable },
+  };
 }

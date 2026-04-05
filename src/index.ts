@@ -1,75 +1,40 @@
-import { Hono } from 'hono';
-import { cors } from 'hono/cors';
-import { requestId } from './middleware/request-id.js';
-import { errorHandler } from './middleware/error-handler.js';
-import api from './routes/index.js';
+import { serve } from '@hono/node-server';
+import { app } from './app.js';
 import { env } from './config/env.js';
-import { queryClient } from './config/database.js';
-import { redis } from './config/redis.js';
-import { logger } from './lib/logger.js';
-import type { AppEnv } from './types/hono.js';
+import { startWorker, stopWorker } from './jobs/worker.js';
 
-const app = new Hono<AppEnv>();
-
-// Global middleware
-app.use('*', requestId);
-
-const corsOrigins = env.CORS_ORIGINS
-  ? env.CORS_ORIGINS.split(',')
-      .map((o) => o.trim())
-      .filter(Boolean)
-  : ['http://localhost:5173', 'http://localhost:3000'];
-
-app.use(
-  '*',
-  cors({
-    origin: corsOrigins,
-    credentials: true,
-  }),
-);
-
-// Health check — verifies DB and Redis connectivity
-app.get('/health', async (c) => {
-  let dbOk = false;
-  let redisOk = false;
-
+async function main() {
+  // Start background job worker
   try {
-    await queryClient`SELECT 1`;
-    dbOk = true;
+    await startWorker();
   } catch (err) {
-    logger.error({ err }, 'Health check: database unreachable');
+    console.warn('[startup] pg-boss worker failed to start (database may not be ready):', (err as Error).message);
   }
 
-  if (redis) {
-    try {
-      await redis.ping();
-      redisOk = true;
-    } catch (err) {
-      logger.error({ err }, 'Health check: Redis unreachable');
+  // Start HTTP server
+  const server = serve({ fetch: app.fetch, port: env.PORT }, (info) => {
+    console.info(`[startup] InvenTrack API running on port ${info.port}`);
+    console.info(`[startup] Environment: ${env.NODE_ENV}`);
+    if (env.NODE_ENV !== 'production') {
+      console.info(`[startup] Swagger UI: http://localhost:${info.port}/docs`);
     }
-  } else {
-    // Redis is optional — mark as ok if not configured
-    redisOk = true;
-  }
+  });
 
-  const status = dbOk && redisOk ? 'healthy' : 'degraded';
-  const httpStatus = dbOk && redisOk ? 200 : 503;
+  // Graceful shutdown
+  const shutdown = async (signal: string) => {
+    console.info(`[shutdown] Received ${signal}, shutting down...`);
+    await stopWorker();
+    server.close(() => {
+      console.info('[shutdown] Server closed');
+      process.exit(0);
+    });
+  };
 
-  return c.json(
-    {
-      status,
-      timestamp: new Date().toISOString(),
-      db: dbOk,
-      redis: redisOk,
-    },
-    httpStatus,
-  );
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+}
+
+main().catch((err) => {
+  console.error('[startup] Fatal error:', err);
+  process.exit(1);
 });
-
-// API v1 routes
-app.route('/api/v1', api);
-
-// Global error handler
-app.onError(errorHandler);
-
-export default app;

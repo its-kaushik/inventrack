@@ -1,59 +1,144 @@
-import { pgTable, uuid, varchar, decimal, integer, boolean, date, timestamp, uniqueIndex, pgEnum } from 'drizzle-orm/pg-core';
+import {
+  pgTable,
+  uuid,
+  varchar,
+  text,
+  integer,
+  numeric,
+  date,
+  timestamp,
+  index,
+  uniqueIndex,
+  pgEnum,
+} from 'drizzle-orm/pg-core';
 import { tenants } from './tenants.js';
-import { suppliers } from './suppliers.js';
 import { users } from './users.js';
-import { products } from './products.js';
-import { text } from 'drizzle-orm/pg-core';
+import { suppliers } from './suppliers.js';
+import { productVariants } from './products.js';
 
-export const poStatusEnum = pgEnum('po_status', ['draft', 'sent', 'partially_received', 'received', 'cancelled']);
+// ── Purchase Orders ──
 
-export const purchaseOrders = pgTable('purchase_orders', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  tenantId: uuid('tenant_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
-  poNumber: varchar('po_number', { length: 30 }).notNull(),
-  supplierId: uuid('supplier_id').notNull().references(() => suppliers.id),
-  status: poStatusEnum('status').notNull().default('draft'),
-  expectedTotal: decimal('expected_total', { precision: 12, scale: 2 }).notNull().default('0'),
-  notes: text('notes'),
-  createdBy: uuid('created_by').notNull().references(() => users.id),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-}, (table) => [
-  uniqueIndex('idx_po_tenant_number').on(table.tenantId, table.poNumber),
+export const poStatusEnum = pgEnum('po_status', [
+  'draft',
+  'sent',
+  'partially_received',
+  'fully_received',
+  'cancelled',
 ]);
+
+export const purchaseOrders = pgTable(
+  'purchase_orders',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id),
+    poNumber: varchar('po_number', { length: 50 }).notNull(),
+    supplierId: uuid('supplier_id')
+      .notNull()
+      .references(() => suppliers.id),
+    status: poStatusEnum('status').notNull().default('draft'),
+    expectedDate: date('expected_date'),
+    totalAmount: numeric('total_amount', { precision: 12, scale: 2 }).notNull().default('0'),
+    notes: text('notes'),
+    createdBy: uuid('created_by').references(() => users.id),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('idx_po_tenant_number').on(table.tenantId, table.poNumber),
+    index('idx_po_tenant_supplier').on(table.tenantId, table.supplierId),
+    index('idx_po_tenant_status').on(table.tenantId, table.status),
+  ],
+);
 
 export const purchaseOrderItems = pgTable('purchase_order_items', {
   id: uuid('id').primaryKey().defaultRandom(),
-  poId: uuid('po_id').notNull().references(() => purchaseOrders.id, { onDelete: 'cascade' }),
-  productId: uuid('product_id').notNull().references(() => products.id),
-  orderedQty: integer('ordered_qty').notNull(),
-  receivedQty: integer('received_qty').notNull().default(0),
-  expectedCost: decimal('expected_cost', { precision: 10, scale: 2 }).notNull(),
+  purchaseOrderId: uuid('purchase_order_id')
+    .notNull()
+    .references(() => purchaseOrders.id, { onDelete: 'cascade' }),
+  variantId: uuid('variant_id')
+    .notNull()
+    .references(() => productVariants.id),
+  orderedQuantity: integer('ordered_quantity').notNull(),
+  receivedQuantity: integer('received_quantity').notNull().default(0),
+  expectedCostPrice: numeric('expected_cost_price', { precision: 12, scale: 2 }).notNull(),
 });
 
-export const purchases = pgTable('purchases', {
+// ── Goods Receipts ──
+
+export const receiptPaymentModeEnum = pgEnum('receipt_payment_mode', ['paid', 'credit', 'partial']);
+
+export const goodsReceipts = pgTable(
+  'goods_receipts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id),
+    receiptNumber: varchar('receipt_number', { length: 50 }).notNull(),
+    supplierId: uuid('supplier_id')
+      .notNull()
+      .references(() => suppliers.id),
+    purchaseOrderId: uuid('purchase_order_id'), // NULL for direct purchase. FK added in M7b.
+    supplierInvoiceNo: varchar('supplier_invoice_no', { length: 100 }),
+    supplierInvoiceDate: date('supplier_invoice_date'),
+    supplierInvoiceUrl: text('supplier_invoice_url'),
+    paymentMode: receiptPaymentModeEnum('payment_mode').notNull(),
+    amountPaid: numeric('amount_paid', { precision: 12, scale: 2 }).notNull().default('0'),
+    totalAmount: numeric('total_amount', { precision: 12, scale: 2 }).notNull(),
+    totalGst: numeric('total_gst', { precision: 12, scale: 2 }).notNull().default('0'),
+    paymentDueDate: date('payment_due_date'),
+    createdBy: uuid('created_by').references(() => users.id),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('idx_receipts_tenant_number').on(table.tenantId, table.receiptNumber),
+    index('idx_receipts_tenant_supplier').on(table.tenantId, table.supplierId),
+  ],
+);
+
+export const goodsReceiptItems = pgTable('goods_receipt_items', {
   id: uuid('id').primaryKey().defaultRandom(),
-  tenantId: uuid('tenant_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
-  poId: uuid('po_id').references(() => purchaseOrders.id),
-  supplierId: uuid('supplier_id').notNull().references(() => suppliers.id),
-  invoiceNumber: varchar('invoice_number', { length: 50 }),
-  invoiceDate: date('invoice_date'),
-  invoiceImageUrl: varchar('invoice_image_url', { length: 500 }),
-  totalAmount: decimal('total_amount', { precision: 12, scale: 2 }).notNull(),
-  cgstAmount: decimal('cgst_amount', { precision: 10, scale: 2 }).notNull().default('0'),
-  sgstAmount: decimal('sgst_amount', { precision: 10, scale: 2 }).notNull().default('0'),
-  igstAmount: decimal('igst_amount', { precision: 10, scale: 2 }).notNull().default('0'),
-  isRcm: boolean('is_rcm').notNull().default(false),
-  createdBy: uuid('created_by').notNull().references(() => users.id),
+  goodsReceiptId: uuid('goods_receipt_id')
+    .notNull()
+    .references(() => goodsReceipts.id, { onDelete: 'cascade' }),
+  variantId: uuid('variant_id')
+    .notNull()
+    .references(() => productVariants.id),
+  quantity: integer('quantity').notNull(),
+  costPrice: numeric('cost_price', { precision: 12, scale: 2 }).notNull(),
+  cgstAmount: numeric('cgst_amount', { precision: 12, scale: 2 }).notNull().default('0'),
+  sgstAmount: numeric('sgst_amount', { precision: 12, scale: 2 }).notNull().default('0'),
+  igstAmount: numeric('igst_amount', { precision: 12, scale: 2 }).notNull().default('0'),
+});
+
+// ── Purchase Returns ──
+
+export const purchaseReturns = pgTable('purchase_returns', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  tenantId: uuid('tenant_id')
+    .notNull()
+    .references(() => tenants.id),
+  returnNumber: varchar('return_number', { length: 50 }).notNull(),
+  supplierId: uuid('supplier_id')
+    .notNull()
+    .references(() => suppliers.id),
+  goodsReceiptId: uuid('goods_receipt_id').references(() => goodsReceipts.id),
+  totalAmount: numeric('total_amount', { precision: 12, scale: 2 }).notNull(),
+  reason: text('reason'),
+  createdBy: uuid('created_by').references(() => users.id),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const purchaseItems = pgTable('purchase_items', {
+export const purchaseReturnItems = pgTable('purchase_return_items', {
   id: uuid('id').primaryKey().defaultRandom(),
-  purchaseId: uuid('purchase_id').notNull().references(() => purchases.id, { onDelete: 'cascade' }),
-  productId: uuid('product_id').notNull().references(() => products.id),
+  purchaseReturnId: uuid('purchase_return_id')
+    .notNull()
+    .references(() => purchaseReturns.id, { onDelete: 'cascade' }),
+  variantId: uuid('variant_id')
+    .notNull()
+    .references(() => productVariants.id),
   quantity: integer('quantity').notNull(),
-  costPrice: decimal('cost_price', { precision: 10, scale: 2 }).notNull(),
-  gstRate: decimal('gst_rate', { precision: 5, scale: 2 }).notNull().default('0'),
-  gstAmount: decimal('gst_amount', { precision: 10, scale: 2 }).notNull().default('0'),
+  costPrice: numeric('cost_price', { precision: 12, scale: 2 }).notNull(),
 });

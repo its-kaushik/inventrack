@@ -1,281 +1,216 @@
-import { eq, and, desc, sql } from 'drizzle-orm';
-import { db } from '../config/database.js';
-import { tenants } from '../db/schema/tenants.js';
-import { bills, billItems } from '../db/schema/bills.js';
-import { returns, returnItems } from '../db/schema/returns.js';
-import { stockEntries } from '../db/schema/stock-entries.js';
-import { cashRegisters, cashRegisterEntries } from '../db/schema/cash-registers.js';
-import { Decimal, decimalSum, toDbDecimal } from '../lib/money.js';
-import { NotFoundError, ValidationError, ReturnWindowExpiredError } from '../lib/errors.js';
-import { DEFAULT_TENANT_SETTINGS } from '../lib/constants.js';
-import * as billNumberService from './bill-number.service.js';
-import * as ledgerService from './ledger.service.js';
-import type { UserRole, RefundMode } from '../types/enums.js';
+import { eq, and } from 'drizzle-orm';
+import { db } from '../db/client.js';
+import { sales, saleItems } from '../db/schema/sales.js';
+import { salesReturns, salesReturnItems } from '../db/schema/returns.js';
+import { customers, customerTransactions } from '../db/schema/customers.js';
+import { productVariants, inventoryMovements } from '../db/schema/products.js';
+import { tenantSettings } from '../db/schema/tenants.js';
+import { incrementStock } from '../lib/stock-manager.js';
+import { AppError } from '../types/errors.js';
+import { AuditRepository } from '../repositories/audit.repository.js';
+import { nanoid } from 'nanoid';
+import type { AuthContext } from '../types/context.js';
 
-// ======================== TYPES ========================
+const auditRepo = new AuditRepository(db);
 
-interface ProcessReturnInput {
-  originalBillId: string;
-  refundMode: RefundMode;
-  reason?: string;
-  items: Array<{ billItemId: string; quantity: number }>;
-  exchangeBillId?: string;
-}
-
-// ======================== HELPERS ========================
-
-function daysBetween(dateA: Date, dateB: Date): number {
-  const msPerDay = 24 * 60 * 60 * 1000;
-  return Math.floor(Math.abs(dateB.getTime() - dateA.getTime()) / msPerDay);
-}
-
-// ======================== PROCESS RETURN ========================
+type ReturnReason = 'size_issue' | 'defect' | 'changed_mind' | 'color_mismatch' | 'other';
 
 export async function processReturn(
-  tenantId: string,
-  userId: string,
-  role: UserRole,
-  input: ProcessReturnInput,
+  auth: AuthContext,
+  data: {
+    originalSaleId: string;
+    returnType: 'full' | 'partial' | 'exchange';
+    items: Array<{ saleItemId: string; quantity: number; reason: ReturnReason }>;
+    refundMode: 'cash' | 'khata' | 'exchange' | 'store_credit';
+  },
 ) {
+  const tenantId = auth.tenantId!;
+
   return db.transaction(async (tx) => {
-    // 1. Fetch original bill and verify status
-    const [bill] = await tx
-      .select()
-      .from(bills)
-      .where(and(eq(bills.id, input.originalBillId), eq(bills.tenantId, tenantId)))
-      .limit(1);
+    // 1. Fetch original sale
+    const [sale] = await tx.select().from(sales)
+      .where(and(eq(sales.id, data.originalSaleId), eq(sales.tenantId, tenantId)));
+    if (!sale) throw new AppError('NOT_FOUND', 'Original sale not found', 404);
+    if (sale.status === 'cancelled') throw new AppError('CONFLICT', 'Cannot return a cancelled sale', 409);
 
-    if (!bill) throw new NotFoundError('Bill', input.originalBillId);
+    // 2. Validate return window
+    const [settings] = await tx.select({ returnWindowDays: tenantSettings.returnWindowDays })
+      .from(tenantSettings).where(eq(tenantSettings.tenantId, tenantId));
+    const windowDays = settings?.returnWindowDays ?? 7;
+    const saleAgeMs = Date.now() - new Date(sale.createdAt).getTime();
+    const isWithinWindow = saleAgeMs <= windowDays * 24 * 60 * 60 * 1000;
 
-    if (bill.status !== 'completed' && bill.status !== 'partially_returned') {
-      throw new ValidationError(
-        `Cannot process return for bill with status '${bill.status}'. Only completed or partially returned bills are eligible.`,
-      );
-    }
+    // Fetch all original sale items
+    const originalItems = await tx.select().from(saleItems).where(eq(saleItems.saleId, sale.id));
 
-    // 2. Check return window
-    const [tenant] = await tx
-      .select({ settings: tenants.settings })
-      .from(tenants)
-      .where(eq(tenants.id, tenantId))
-      .limit(1);
-
-    const settings = (tenant?.settings ?? {}) as Record<string, unknown>;
-    const returnWindowDays =
-      typeof settings.return_window_days === 'number'
-        ? settings.return_window_days
-        : DEFAULT_TENANT_SETTINGS.return_window_days;
-
-    const daysSinceSale = daysBetween(new Date(bill.createdAt), new Date());
-
-    if (daysSinceSale > returnWindowDays && role === 'salesperson') {
-      throw new ReturnWindowExpiredError();
-    }
-
-    // 3. Validate each return item and compute refund amounts
-    const computedItems: Array<{
-      billItemId: string;
+    // 3. Calculate refund from ORIGINAL bill prices (not current)
+    let totalRefundAmount = 0;
+    const returnItems: Array<{
+      saleItemId: string;
+      variantId: string | null;
       quantity: number;
-      refundAmount: Decimal;
-      productId: string;
-      costPrice: string;
+      refundAmount: number;
+      reason: ReturnReason;
+      version: number;
     }> = [];
 
-    for (const item of input.items) {
-      const [billItem] = await tx
-        .select()
-        .from(billItems)
-        .where(and(eq(billItems.id, item.billItemId), eq(billItems.billId, bill.id)))
-        .limit(1);
-
-      if (!billItem) throw new NotFoundError('BillItem', item.billItemId);
-
-      const availableQty = billItem.quantity - billItem.returnedQty;
-      if (item.quantity > availableQty) {
-        throw new ValidationError(
-          `Cannot return ${item.quantity} units of '${billItem.productName}' (SKU: ${billItem.sku}). Only ${availableQty} unit(s) eligible for return.`,
-        );
+    for (const item of data.items) {
+      const originalItem = originalItems.find((oi) => oi.id === item.saleItemId);
+      if (!originalItem) throw new AppError('NOT_FOUND', `Sale item ${item.saleItemId} not found`, 404);
+      if (item.quantity > originalItem.quantity) {
+        throw new AppError('VALIDATION_ERROR', `Return quantity (${item.quantity}) exceeds original (${originalItem.quantity})`, 400);
       }
 
-      // Refund amount computed from original line total, never current product master
-      const refundAmount = new Decimal(billItem.lineTotal)
-        .div(billItem.quantity)
-        .times(item.quantity)
-        .toDecimalPlaces(2);
+      // Refund = original unit price × return qty (from original bill, not current MRP)
+      const unitPrice = Number(originalItem.unitPrice);
+      const refundAmount = Math.round(unitPrice * item.quantity * 100) / 100;
+      totalRefundAmount += refundAmount;
 
-      computedItems.push({
-        billItemId: item.billItemId,
+      // Get variant version for stock restore
+      let version = 1;
+      if (originalItem.variantId) {
+        const [variant] = await tx.select({ version: productVariants.version })
+          .from(productVariants).where(eq(productVariants.id, originalItem.variantId));
+        version = variant?.version ?? 1;
+      }
+
+      returnItems.push({
+        saleItemId: item.saleItemId,
+        variantId: originalItem.variantId,
         quantity: item.quantity,
         refundAmount,
-        productId: billItem.productId,
-        costPrice: billItem.costPrice,
+        reason: item.reason,
+        version,
       });
     }
 
-    // 4. Compute total refund amount
-    const totalRefundAmount = decimalSum(computedItems, (i) => i.refundAmount);
+    // 4. Khata interaction
+    const [customer] = await tx.select().from(customers).where(eq(customers.id, sale.customerId));
+    if (!customer) throw new AppError('NOT_FOUND', 'Customer not found', 404);
 
-    // 5. Generate return number
-    const returnNumber = await billNumberService.next(tx, tenantId, 'return');
+    let khataAdjustment = 0;
+    let cashRefund = totalRefundAmount;
 
-    // 6. Insert return record
-    const [returnRecord] = await tx
-      .insert(returns)
-      .values({
+    const customerBalance = Number(customer.outstandingBalance);
+    if (customerBalance > 0 && data.refundMode !== 'exchange') {
+      // Auto-reduce khata first
+      khataAdjustment = Math.min(totalRefundAmount, customerBalance);
+      cashRefund = totalRefundAmount - khataAdjustment;
+
+      // Update customer balance
+      const newBalance = customerBalance - khataAdjustment;
+      await tx.update(customers)
+        .set({ outstandingBalance: String(newBalance), updatedAt: new Date() })
+        .where(eq(customers.id, sale.customerId));
+
+      // Create customer transaction for khata adjustment
+      await tx.insert(customerTransactions).values({
         tenantId,
-        originalBillId: input.originalBillId,
-        returnNumber,
-        refundMode: input.refundMode,
-        refundAmount: String(toDbDecimal(totalRefundAmount)),
-        reason: input.reason ?? null,
-        processedBy: userId,
-        exchangeBillId: input.exchangeBillId ?? null,
-      })
-      .returning();
-
-    // 7. Insert return items
-    for (const item of computedItems) {
-      await tx.insert(returnItems).values({
-        returnId: returnRecord.id,
-        billItemId: item.billItemId,
-        quantity: item.quantity,
-        refundAmount: String(toDbDecimal(item.refundAmount)),
-      });
-    }
-
-    // 8. Update billItem.returnedQty for each item
-    for (const item of computedItems) {
-      await tx.execute(
-        sql`UPDATE bill_items SET returned_qty = returned_qty + ${item.quantity} WHERE id = ${item.billItemId}`,
-      );
-    }
-
-    // 9. Check if bill is fully returned -> update bill status
-    const updatedBillItems = await tx
-      .select({ quantity: billItems.quantity, returnedQty: billItems.returnedQty })
-      .from(billItems)
-      .where(eq(billItems.billId, bill.id));
-
-    const fullyReturned = updatedBillItems.every((bi) => bi.returnedQty >= bi.quantity);
-    const newStatus = fullyReturned ? 'returned' : 'partially_returned';
-
-    await tx.update(bills).set({ status: newStatus }).where(eq(bills.id, bill.id));
-
-    // 10. Create positive stock entries (return_customer)
-    for (const item of computedItems) {
-      await tx.insert(stockEntries).values({
-        tenantId,
-        productId: item.productId,
-        quantity: item.quantity, // positive — stock coming back in
-        type: 'return_customer',
+        customerId: sale.customerId,
+        type: 'return_adjustment',
+        amount: String(-khataAdjustment), // Negative = they owe less
+        balanceAfter: String(newBalance),
         referenceType: 'return',
-        referenceId: returnRecord.id,
-        costPriceAtEntry: item.costPrice,
-        createdBy: userId,
+        notes: `Return against bill ${sale.billNumber}`,
+        createdBy: auth.userId,
       });
     }
 
-    // 11. Handle refund mode
-    if (input.refundMode === 'cash') {
-      // Find open cash register for this user
-      const [register] = await tx
-        .select({ id: cashRegisters.id })
-        .from(cashRegisters)
-        .where(
-          and(
-            eq(cashRegisters.tenantId, tenantId),
-            eq(cashRegisters.userId, userId),
-            eq(cashRegisters.status, 'open'),
-          ),
-        )
-        .limit(1);
+    const returnNumber = `RET-${Date.now().toString(36).toUpperCase()}-${nanoid(4).toUpperCase()}`;
 
-      if (register) {
-        await tx.insert(cashRegisterEntries).values({
-          registerId: register.id,
-          type: 'petty_expense',
-          amount: String(-toDbDecimal(totalRefundAmount)), // negative — cash going out
-          referenceType: 'return',
-          referenceId: returnRecord.id,
-          description: `Cash refund for return ${returnNumber}`,
-        });
-      }
-    } else if (input.refundMode === 'credit_note') {
-      // Only create ledger entry if the original bill had a customer
-      if (bill.customerId) {
-        await ledgerService.createEntry(tx, {
-          tenantId,
-          partyType: 'customer',
-          partyId: bill.customerId,
-          entryType: 'return',
-          debit: 0,
-          credit: toDbDecimal(totalRefundAmount),
-          referenceType: 'return',
-          referenceId: returnRecord.id,
-          description: `Credit note for return ${returnNumber}`,
-          createdBy: userId,
-        });
+    // 5. Create sales_returns record
+    const [returnRecord] = await tx.insert(salesReturns).values({
+      tenantId,
+      returnNumber,
+      originalSaleId: data.originalSaleId,
+      customerId: sale.customerId,
+      returnType: data.returnType,
+      totalRefundAmount: String(totalRefundAmount),
+      refundMode: data.refundMode,
+      khataAdjustment: String(khataAdjustment),
+      cashRefund: String(cashRefund),
+      isWithinWindow,
+      processedBy: auth.userId,
+    }).returning();
 
-        // Reduce customer outstanding balance (negative amount reduces what they owe)
-        await ledgerService.updateCustomerBalance(
-          tx,
+    // 6. Create return items + restore stock
+    for (const item of returnItems) {
+      await tx.insert(salesReturnItems).values({
+        salesReturnId: returnRecord.id,
+        saleItemId: item.saleItemId,
+        variantId: item.variantId,
+        quantity: item.quantity,
+        refundAmount: String(item.refundAmount),
+        reason: item.reason,
+      });
+
+      // Restore stock
+      if (item.variantId) {
+        const updated = await incrementStock(tx, tenantId, item.variantId, item.quantity, item.version);
+
+        await tx.insert(inventoryMovements).values({
           tenantId,
-          bill.customerId,
-          -toDbDecimal(totalRefundAmount),
-        );
+          variantId: item.variantId,
+          movementType: 'sale_return',
+          quantity: item.quantity,
+          referenceType: 'sales_return',
+          referenceId: returnRecord.id,
+          balanceAfter: updated.availableQuantity,
+          notes: `Return: ${item.reason}`,
+          createdBy: auth.userId,
+        });
       }
     }
-    // exchange mode: exchangeBillId is set on the return record; the caller handles the exchange bill separately
 
-    // 12. Return the created return record
-    return returnRecord;
+    // 7. Update original sale status
+    const isFullReturn = data.returnType === 'full';
+    await tx.update(sales)
+      .set({
+        status: isFullReturn ? 'returned' : 'partially_returned',
+        updatedAt: new Date(),
+      })
+      .where(eq(sales.id, data.originalSaleId));
+
+    // 8. Audit log
+    await auditRepo.withTransaction(tx).log({
+      tenantId,
+      userId: auth.userId,
+      action: 'sales_return_processed',
+      entityType: 'sales_return',
+      entityId: returnRecord.id,
+      newValue: {
+        returnNumber,
+        originalBill: sale.billNumber,
+        returnType: data.returnType,
+        totalRefundAmount,
+        khataAdjustment,
+        cashRefund,
+        isWithinWindow,
+        itemCount: returnItems.length,
+      },
+    });
+
+    return {
+      ...returnRecord,
+      items: returnItems,
+      isWithinWindow,
+    };
   });
 }
 
-// ======================== LIST RETURNS ========================
-
-export async function listReturns(
-  tenantId: string,
-  filters: {
-    originalBillId?: string;
-    limit?: number;
-    offset?: number;
-  },
-) {
-  const conditions: any[] = [eq(returns.tenantId, tenantId)];
-  if (filters.originalBillId) {
-    conditions.push(eq(returns.originalBillId, filters.originalBillId));
-  }
-
-  const limit = Math.min(filters.limit || 20, 100);
-  const offset = filters.offset || 0;
-
-  const items = await db
-    .select()
-    .from(returns)
-    .where(and(...conditions))
-    .orderBy(desc(returns.createdAt))
-    .limit(limit + 1)
-    .offset(offset);
-
-  const hasMore = items.length > limit;
-  if (hasMore) items.pop();
-
-  return { items, hasMore };
-}
-
-// ======================== GET RETURN BY ID ========================
-
 export async function getReturnById(tenantId: string, returnId: string) {
-  const [returnRecord] = await db
-    .select()
-    .from(returns)
-    .where(and(eq(returns.id, returnId), eq(returns.tenantId, tenantId)))
-    .limit(1);
+  const [returnRecord] = await db.select().from(salesReturns)
+    .where(and(eq(salesReturns.id, returnId), eq(salesReturns.tenantId, tenantId)));
+  if (!returnRecord) throw new AppError('NOT_FOUND', 'Return not found', 404);
 
-  if (!returnRecord) throw new NotFoundError('Return', returnId);
-
-  const items = await db.select().from(returnItems).where(eq(returnItems.returnId, returnId));
+  const items = await db.select().from(salesReturnItems)
+    .where(eq(salesReturnItems.salesReturnId, returnId));
 
   return { ...returnRecord, items };
+}
+
+export async function listReturns(tenantId: string) {
+  return db.select().from(salesReturns)
+    .where(eq(salesReturns.tenantId, tenantId))
+    .orderBy(salesReturns.createdAt);
 }

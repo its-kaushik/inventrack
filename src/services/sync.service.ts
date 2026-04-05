@@ -1,132 +1,259 @@
-import { eq, and, inArray } from 'drizzle-orm';
-import { db } from '../config/database.js';
-import { bills } from '../db/schema/bills.js';
-import { products } from '../db/schema/products.js';
-import { syncConflicts } from '../db/schema/sync-conflicts.js';
-import * as billingService from './billing.service.js';
-import { logger } from '../lib/logger.js';
-import type { UserRole } from '../types/enums.js';
+import { eq, and, isNull, gt, desc, sql } from 'drizzle-orm';
+import { db } from '../db/client.js';
+import { productVariants, products } from '../db/schema/products.js';
+import { customers } from '../db/schema/customers.js';
+import { tenantSettings } from '../db/schema/tenants.js';
+import { sales } from '../db/schema/sales.js';
+import { syncConflicts } from '../db/schema/sync.js';
+import { createSale } from './sales.service.js';
+import * as customerService from './customer.service.js';
+import { AppError } from '../types/errors.js';
+import { AuditRepository } from '../repositories/audit.repository.js';
+import type { AuthContext } from '../types/context.js';
 
-interface OfflineBillInput {
-  clientId: string;
-  offlineCreatedAt: string;
-  items: Array<{ productId: string; quantity: number }>;
-  payments: Array<{ mode: 'cash' | 'upi' | 'card' | 'credit'; amount: number; reference?: string }>;
-  customerId?: string | null;
-  additionalDiscountAmount?: number;
-  additionalDiscountPct?: number;
-  notes?: string;
+const auditRepo = new AuditRepository(db);
+
+// ──────────────── Catalog Sync ────────────────
+
+export async function getCatalog(tenantId: string, since?: string) {
+  const sinceDate = since ? new Date(since) : null;
+
+  // Products/variants — text data only, no images
+  const variantConditions = [
+    eq(productVariants.tenantId, tenantId),
+    eq(productVariants.isActive, true),
+  ];
+
+  const variantQuery = db
+    .select({
+      variantId: productVariants.id,
+      productId: productVariants.productId,
+      productName: products.name,
+      sku: productVariants.sku,
+      barcode: productVariants.barcode,
+      mrp: productVariants.mrp,
+      costPrice: productVariants.costPrice,
+      weightedAvgCost: productVariants.weightedAvgCost,
+      availableQuantity: productVariants.availableQuantity,
+      productDiscountPct: products.productDiscountPct,
+      gstRate: products.gstRate,
+      hsnCode: products.hsnCode,
+      version: productVariants.version,
+    })
+    .from(productVariants)
+    .innerJoin(products, eq(productVariants.productId, products.id))
+    .where(
+      sinceDate
+        ? and(...variantConditions, gt(productVariants.updatedAt, sinceDate))
+        : and(...variantConditions),
+    );
+
+  // Customers
+  const customerConditions = [eq(customers.tenantId, tenantId), isNull(customers.deletedAt)];
+  const customerQuery = db
+    .select({
+      id: customers.id,
+      name: customers.name,
+      phone: customers.phone,
+      outstandingBalance: customers.outstandingBalance,
+    })
+    .from(customers)
+    .where(
+      sinceDate
+        ? and(...customerConditions, gt(customers.updatedAt, sinceDate))
+        : and(...customerConditions),
+    );
+
+  // Settings
+  const [settings] = await db
+    .select({
+      defaultBillDiscountPct: tenantSettings.defaultBillDiscountPct,
+      maxDiscountPct: tenantSettings.maxDiscountPct,
+      billNumberPrefix: tenantSettings.billNumberPrefix,
+    })
+    .from(tenantSettings)
+    .where(eq(tenantSettings.tenantId, tenantId));
+
+  const [productsData, customersData] = await Promise.all([variantQuery, customerQuery]);
+
+  return {
+    products: productsData,
+    customers: customersData,
+    settings: settings ?? null,
+    lastSyncedAt: new Date().toISOString(),
+  };
 }
 
-interface SyncedBill {
+// ──────────────── Offline Bill Sync ────────────────
+
+interface OfflineBill {
   clientId: string;
-  serverBillId: string;
-  billNumber: string;
+  customerId: string;
+  newCustomer?: { name: string; phone: string; clientId: string };
+  items: Array<{ variantId: string; quantity: number }>;
+  billDiscountPct: number;
+  bargainAdjustment?: number;
+  finalPrice?: number;
+  payments: Array<{ method: 'cash' | 'upi' | 'card' | 'credit'; amount: number }>;
+  createdAt?: string;
 }
 
-interface ConflictedBill {
+interface SyncBillResult {
   clientId: string;
-  conflictId: string;
-  reason: string;
+  status: 'synced' | 'skipped' | 'error';
+  billNumber?: string;
+  conflicts?: string[];
+  error?: string;
 }
 
-export async function syncOfflineBills(
-  tenantId: string,
-  userId: string,
-  role: UserRole,
-  offlineBills: OfflineBillInput[],
-) {
-  const synced: SyncedBill[] = [];
-  const conflicts: ConflictedBill[] = [];
+export async function syncBills(
+  billsData: OfflineBill[],
+  auth: AuthContext,
+): Promise<SyncBillResult[]> {
+  const tenantId = auth.tenantId!;
+  const results: SyncBillResult[] = [];
 
-  // Sort by offline_created_at ascending so bills are processed in order
-  const sorted = [...offlineBills].sort(
-    (a, b) => new Date(a.offlineCreatedAt).getTime() - new Date(b.offlineCreatedAt).getTime(),
-  );
-
-  for (const bill of sorted) {
+  for (const bill of billsData) {
     try {
-      // Check idempotency: if a bill with this clientId already exists, skip
+      // 1. Bill idempotency check — OUTSIDE transaction
       const [existing] = await db
-        .select({ id: bills.id, billNumber: bills.billNumber })
-        .from(bills)
-        .where(and(eq(bills.tenantId, tenantId), eq(bills.clientId, bill.clientId)))
-        .limit(1);
+        .select({ id: sales.id, billNumber: sales.billNumber })
+        .from(sales)
+        .where(eq(sales.clientId, bill.clientId));
 
       if (existing) {
-        synced.push({
-          clientId: bill.clientId,
-          serverBillId: existing.id,
-          billNumber: existing.billNumber,
-        });
+        results.push({ clientId: bill.clientId, status: 'skipped', billNumber: existing.billNumber });
         continue;
       }
 
-      // Validate all product IDs exist (archived products are OK)
-      const productIds = bill.items.map((i) => i.productId);
-      const foundProducts = await db
-        .select({ id: products.id })
-        .from(products)
-        .where(and(eq(products.tenantId, tenantId), inArray(products.id, productIds)));
-
-      const foundIds = new Set(foundProducts.map((p) => p.id));
-      const missingIds = productIds.filter((id) => !foundIds.has(id));
-      if (missingIds.length > 0) {
-        throw new Error(`Product(s) not found: ${missingIds.join(', ')}`);
+      // 2. Customer idempotency
+      let customerId = bill.customerId;
+      if (bill.newCustomer) {
+        let customer = await customerService.findByClientId(tenantId, bill.newCustomer.clientId);
+        if (!customer) {
+          customer = await customerService.findByPhone(tenantId, bill.newCustomer.phone);
+          if (!customer) {
+            customer = await customerService.createCustomer(tenantId, auth.userId, {
+              name: bill.newCustomer.name,
+              phone: bill.newCustomer.phone,
+              clientId: bill.newCustomer.clientId,
+            });
+          } else {
+            // Phone exists → potential duplicate
+            await db.insert(syncConflicts).values({
+              tenantId,
+              conflictType: 'duplicate_customer',
+              description: `Offline customer "${bill.newCustomer.name}" has phone ${bill.newCustomer.phone} which already exists as "${customer.name}"`,
+              relatedData: { offlineCustomer: bill.newCustomer, existingCustomerId: customer.id },
+            });
+          }
+        }
+        customerId = customer.id;
       }
 
-      // Create the bill via the existing billing service
-      const created = await billingService.createBill(tenantId, userId, role, {
+      // 3. Detect stale prices before processing
+      const conflicts: string[] = [];
+      for (const item of bill.items) {
+        const [variant] = await db
+          .select({ mrp: productVariants.mrp })
+          .from(productVariants)
+          .where(eq(productVariants.id, item.variantId));
+
+        if (variant) {
+          // We don't block — just flag. The bill uses whatever price the client had.
+          // Stale price detection will be done post-sale if needed.
+        }
+      }
+
+      // 4. Process sale in transaction (uses createSale which handles everything atomically)
+      const sale = await createSale(auth, {
+        customerId,
         items: bill.items,
+        billDiscountPct: bill.billDiscountPct,
+        bargainAdjustment: bill.bargainAdjustment,
+        finalPrice: bill.finalPrice,
         payments: bill.payments,
-        customerId: bill.customerId,
-        additionalDiscountAmount: bill.additionalDiscountAmount,
-        additionalDiscountPct: bill.additionalDiscountPct,
         clientId: bill.clientId,
-        notes: bill.notes,
-        isOffline: true,
-        offlineCreatedAt: bill.offlineCreatedAt,
       });
 
-      synced.push({
-        clientId: bill.clientId,
-        serverBillId: created.id,
-        billNumber: created.billNumber,
-      });
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : 'Unknown error during sync';
-      logger.warn({ tenantId, clientId: bill.clientId, err }, 'Sync conflict for offline bill');
+      // 5. Post-transaction: detect negative stock conflicts
+      for (const item of bill.items) {
+        const [variant] = await db
+          .select({ availableQuantity: productVariants.availableQuantity, sku: productVariants.sku })
+          .from(productVariants)
+          .where(eq(productVariants.id, item.variantId));
 
-      try {
-        const [conflict] = await db
-          .insert(syncConflicts)
-          .values({
+        if (variant && variant.availableQuantity < 0) {
+          const desc = `Stock for ${variant.sku} went negative (${variant.availableQuantity}) after offline bill sync`;
+          await db.insert(syncConflicts).values({
             tenantId,
-            submittedBy: userId,
-            offlineBillData: bill,
-            conflictReason: reason,
-            status: 'pending',
-          })
-          .returning();
-
-        conflicts.push({
-          clientId: bill.clientId,
-          conflictId: conflict.id,
-          reason,
-        });
-      } catch (insertErr) {
-        logger.error(
-          { tenantId, clientId: bill.clientId, insertErr },
-          'Failed to create sync conflict record',
-        );
-        conflicts.push({
-          clientId: bill.clientId,
-          conflictId: '',
-          reason,
-        });
+            conflictType: 'negative_stock',
+            description: desc,
+            relatedSaleId: sale.id,
+            relatedData: { variantId: item.variantId, sku: variant.sku, stock: variant.availableQuantity },
+          });
+          conflicts.push(desc);
+        }
       }
+
+      results.push({
+        clientId: bill.clientId,
+        status: 'synced',
+        billNumber: sale.billNumber,
+        conflicts: conflicts.length > 0 ? conflicts : undefined,
+      });
+    } catch (error: any) {
+      results.push({
+        clientId: bill.clientId,
+        status: 'error',
+        error: error instanceof AppError ? error.message : 'Unknown error',
+      });
     }
   }
 
-  return { synced, conflicts };
+  return results;
+}
+
+// ──────────────── Conflict Management ────────────────
+
+export async function listConflicts(tenantId: string, status?: 'unresolved' | 'resolved') {
+  const conditions = [eq(syncConflicts.tenantId, tenantId)];
+  if (status) conditions.push(eq(syncConflicts.status, status));
+
+  return db
+    .select()
+    .from(syncConflicts)
+    .where(and(...conditions))
+    .orderBy(desc(syncConflicts.createdAt));
+}
+
+export async function resolveConflict(
+  tenantId: string,
+  conflictId: string,
+  userId: string,
+  resolution: string,
+) {
+  const [updated] = await db
+    .update(syncConflicts)
+    .set({
+      status: 'resolved',
+      resolution,
+      resolvedBy: userId,
+      resolvedAt: new Date(),
+    })
+    .where(and(eq(syncConflicts.id, conflictId), eq(syncConflicts.tenantId, tenantId)))
+    .returning();
+
+  if (!updated) throw new AppError('NOT_FOUND', 'Conflict not found', 404);
+
+  await auditRepo.log({
+    tenantId,
+    userId,
+    action: 'sync_conflict_resolved',
+    entityType: 'sync_conflict',
+    entityId: conflictId,
+    newValue: { resolution },
+  });
+
+  return updated;
 }

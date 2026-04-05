@@ -1,13 +1,12 @@
-import { defineConfig } from 'drizzle-kit';
 import 'dotenv/config';
+import { defineConfig } from 'drizzle-kit';
 
 export default defineConfig({
   schema: './src/db/schema/index.ts',
   out: './src/db/migrations',
   dialect: 'postgresql',
   dbCredentials: {
-    // Use DIRECT_URL for migrations (bypasses pgbouncer which doesn't support DDL)
-    // Fall back to DATABASE_URL if DIRECT_URL is not set
-    url: process.env.DIRECT_URL || process.env.DATABASE_URL!,
+    // Use direct connection for migrations (DDL doesn't work through PgBouncer)
+    url: process.env.DATABASE_URL_DIRECT || process.env.DATABASE_URL!,
   },
 });

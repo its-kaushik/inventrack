@@ -1,118 +1,124 @@
-import { eq, and, desc, sql } from 'drizzle-orm';
-import { db } from '../config/database.js';
-import { cashRegisters, cashRegisterEntries } from '../db/schema/cash-registers.js';
-import { NotFoundError, ValidationError } from '../lib/errors.js';
-import { Decimal } from '../lib/money.js';
+import { eq, and } from 'drizzle-orm';
+import { db } from '../db/client.js';
+import { cashRegisters } from '../db/schema/cash-register.js';
+import { AppError } from '../types/errors.js';
+import { AuditRepository } from '../repositories/audit.repository.js';
 
-export async function openRegister(tenantId: string, userId: string, openingBalance: number) {
-  // Check if already open
-  const [existing] = await db.select({ id: cashRegisters.id })
+const auditRepo = new AuditRepository(db);
+
+function todayDateStr(): string {
+  return new Date().toISOString().split('T')[0];
+}
+
+export async function openRegister(
+  tenantId: string,
+  userId: string,
+  openingBalance: number,
+) {
+  const today = todayDateStr();
+
+  // Check if register already open for today
+  const [existing] = await db
+    .select()
     .from(cashRegisters)
-    .where(and(
-      eq(cashRegisters.tenantId, tenantId),
-      eq(cashRegisters.userId, userId),
-      eq(cashRegisters.status, 'open')
-    ))
-    .limit(1);
+    .where(and(eq(cashRegisters.tenantId, tenantId), eq(cashRegisters.date, today)));
 
   if (existing) {
-    throw new ValidationError('You already have an open cash register. Close it before opening a new one.');
+    throw new AppError('CONFLICT', 'Cash register already opened for today', 409);
   }
 
-  const today = new Date().toISOString().split('T')[0];
+  const [register] = await db
+    .insert(cashRegisters)
+    .values({
+      tenantId,
+      date: today,
+      openingBalance: String(openingBalance),
+      status: 'open',
+      openedBy: userId,
+    })
+    .returning();
 
-  const [register] = await db.insert(cashRegisters).values({
+  await auditRepo.log({
     tenantId,
     userId,
-    registerDate: today,
-    openingBalance: String(openingBalance),
-    status: 'open',
-  }).returning();
+    action: 'cash_register_opened',
+    entityType: 'cash_register',
+    entityId: register.id,
+    newValue: { date: today, openingBalance },
+  });
 
   return register;
 }
 
-export async function getCurrentRegister(tenantId: string, userId: string) {
-  const [register] = await db.select()
+export async function closeRegister(
+  tenantId: string,
+  userId: string,
+  actualClosing: number,
+) {
+  const today = todayDateStr();
+
+  const [register] = await db
+    .select()
     .from(cashRegisters)
-    .where(and(
-      eq(cashRegisters.tenantId, tenantId),
-      eq(cashRegisters.userId, userId),
-      eq(cashRegisters.status, 'open')
-    ))
-    .limit(1);
+    .where(
+      and(
+        eq(cashRegisters.tenantId, tenantId),
+        eq(cashRegisters.date, today),
+        eq(cashRegisters.status, 'open'),
+      ),
+    );
 
-  if (!register) return null;
+  if (!register) {
+    throw new AppError('NOT_FOUND', 'No open cash register for today', 404);
+  }
 
-  // Get entries and calculate current balance
-  const entries = await db.select()
-    .from(cashRegisterEntries)
-    .where(eq(cashRegisterEntries.registerId, register.id))
-    .orderBy(desc(cashRegisterEntries.createdAt));
+  // For now, closing balance = opening balance (actual cash tracking from sales/expenses
+  // will be integrated when reports are built in M18)
+  const closingBalance = Number(register.openingBalance); // Placeholder
+  const discrepancy = actualClosing - closingBalance;
 
-  const totalEntries = entries.reduce((sum, e) => sum + Number(e.amount), 0);
-  const currentBalance = new Decimal(register.openingBalance).plus(totalEntries).toDecimalPlaces(2).toNumber();
+  const [closed] = await db
+    .update(cashRegisters)
+    .set({
+      closingBalance: String(closingBalance),
+      actualClosing: String(actualClosing),
+      discrepancy: String(discrepancy),
+      status: 'closed',
+      closedBy: userId,
+      updatedAt: new Date(),
+    })
+    .where(eq(cashRegisters.id, register.id))
+    .returning();
 
-  return { ...register, entries, currentBalance };
+  await auditRepo.log({
+    tenantId,
+    userId,
+    action: 'cash_register_closed',
+    entityType: 'cash_register',
+    entityId: register.id,
+    newValue: { actualClosing, closingBalance, discrepancy },
+  });
+
+  return closed;
 }
 
-export async function getRegisterById(tenantId: string, registerId: string) {
-  const [register] = await db.select()
+export async function getCurrentRegister(tenantId: string) {
+  const today = todayDateStr();
+
+  const [register] = await db
+    .select()
     .from(cashRegisters)
-    .where(and(eq(cashRegisters.id, registerId), eq(cashRegisters.tenantId, tenantId)))
-    .limit(1);
+    .where(and(eq(cashRegisters.tenantId, tenantId), eq(cashRegisters.date, today)));
 
-  if (!register) throw new NotFoundError('CashRegister', registerId);
-
-  const entries = await db.select()
-    .from(cashRegisterEntries)
-    .where(eq(cashRegisterEntries.registerId, registerId))
-    .orderBy(desc(cashRegisterEntries.createdAt));
-
-  return { ...register, entries };
+  return register ?? null;
 }
 
-export async function closeRegister(tenantId: string, userId: string, registerId: string, actualClosing: number) {
-  const [register] = await db.select()
+export async function getRegisterByDate(tenantId: string, date: string) {
+  const [register] = await db
+    .select()
     .from(cashRegisters)
-    .where(and(
-      eq(cashRegisters.id, registerId),
-      eq(cashRegisters.tenantId, tenantId),
-      eq(cashRegisters.userId, userId),
-      eq(cashRegisters.status, 'open')
-    ))
-    .limit(1);
+    .where(and(eq(cashRegisters.tenantId, tenantId), eq(cashRegisters.date, date)));
 
-  if (!register) throw new NotFoundError('Open CashRegister', registerId);
-
-  // Calculate expected closing
-  const [{ total }] = await db.execute(
-    sql`SELECT COALESCE(SUM(CAST(amount AS numeric)), 0) AS total FROM cash_register_entries WHERE register_id = ${registerId}`
-  ) as any;
-
-  const calculatedClosing = new Decimal(register.openingBalance).plus(total).toDecimalPlaces(2).toNumber();
-  const discrepancy = new Decimal(actualClosing).minus(calculatedClosing).toDecimalPlaces(2).toNumber();
-
-  const [updated] = await db.update(cashRegisters).set({
-    calculatedClosing: String(calculatedClosing),
-    actualClosing: String(actualClosing),
-    discrepancy: String(discrepancy),
-    status: 'closed',
-  }).where(eq(cashRegisters.id, registerId)).returning();
-
-  return updated;
-}
-
-export async function getRegisterHistory(tenantId: string, userId: string, limit = 20, offset = 0) {
-  const registers = await db.select()
-    .from(cashRegisters)
-    .where(and(eq(cashRegisters.tenantId, tenantId), eq(cashRegisters.userId, userId)))
-    .orderBy(desc(cashRegisters.registerDate))
-    .limit(limit + 1)
-    .offset(offset);
-
-  const hasMore = registers.length > limit;
-  if (hasMore) registers.pop();
-
-  return { registers, hasMore };
+  if (!register) throw new AppError('NOT_FOUND', `No register found for ${date}`, 404);
+  return register;
 }

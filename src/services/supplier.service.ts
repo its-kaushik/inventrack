@@ -1,117 +1,248 @@
-import { eq, and, asc, desc, ilike, sql } from 'drizzle-orm';
-import { db } from '../config/database.js';
-import { suppliers } from '../db/schema/suppliers.js';
-import { ledgerEntries } from '../db/schema/ledger-entries.js';
-import { purchaseItems } from '../db/schema/purchases.js';
-import { products } from '../db/schema/products.js';
-import { cashRegisters, cashRegisterEntries } from '../db/schema/cash-registers.js';
-import { NotFoundError, DuplicateEntryError } from '../lib/errors.js';
-import * as ledgerService from './ledger.service.js';
-import type { GeneralPaymentMode } from '../types/enums.js';
+import { eq, and, or, ilike, isNull, asc, desc, count, sql } from 'drizzle-orm';
+import { db } from '../db/client.js';
+import { suppliers, supplierTransactions } from '../db/schema/suppliers.js';
+import { AppError } from '../types/errors.js';
+import { AuditRepository } from '../repositories/audit.repository.js';
 
-export async function listSuppliers(tenantId: string, search?: string) {
-  const conditions: any[] = [eq(suppliers.tenantId, tenantId), eq(suppliers.isActive, true)];
-  if (search) conditions.push(ilike(suppliers.name, `%${search}%`));
+const auditRepo = new AuditRepository(db);
 
-  return db.select().from(suppliers)
-    .where(and(...conditions))
-    .orderBy(asc(suppliers.name));
-}
+// ──────────────── CRUD ────────────────
 
-export async function getSupplierById(tenantId: string, id: string) {
-  const [supplier] = await db.select().from(suppliers)
-    .where(and(eq(suppliers.id, id), eq(suppliers.tenantId, tenantId)))
-    .limit(1);
-  if (!supplier) throw new NotFoundError('Supplier', id);
-  return supplier;
-}
-
-export async function createSupplier(tenantId: string, input: {
-  name: string; contactPerson?: string; phone?: string; email?: string;
-  address?: string; gstin?: string; paymentTerms?: string; notes?: string;
-}) {
-  const [supplier] = await db.insert(suppliers).values({ tenantId, ...input }).returning();
-  return supplier;
-}
-
-export async function updateSupplier(tenantId: string, id: string, patch: Record<string, unknown>) {
-  const [updated] = await db.update(suppliers).set(patch)
-    .where(and(eq(suppliers.id, id), eq(suppliers.tenantId, tenantId)))
+export async function createSupplier(
+  tenantId: string,
+  userId: string,
+  data: {
+    name: string;
+    contactPerson?: string;
+    phone?: string;
+    email?: string;
+    address?: string;
+    gstin?: string;
+    pan?: string;
+    bankDetails?: Record<string, unknown>;
+    paymentTerms?: string;
+  },
+) {
+  const [supplier] = await db
+    .insert(suppliers)
+    .values({
+      tenantId,
+      name: data.name,
+      contactPerson: data.contactPerson ?? null,
+      phone: data.phone ?? null,
+      email: data.email ?? null,
+      address: data.address ?? null,
+      gstin: data.gstin ?? null,
+      pan: data.pan ?? null,
+      bankDetails: data.bankDetails ?? null,
+      paymentTerms: data.paymentTerms ?? 'cod',
+    })
     .returning();
-  if (!updated) throw new NotFoundError('Supplier', id);
+
+  await auditRepo.log({
+    tenantId,
+    userId,
+    action: 'supplier_created',
+    entityType: 'supplier',
+    entityId: supplier.id,
+    newValue: { name: data.name },
+  });
+
+  return supplier;
+}
+
+export async function listSuppliers(
+  tenantId: string,
+  opts?: { search?: string; isActive?: boolean; page?: number; limit?: number },
+) {
+  const page = opts?.page ?? 1;
+  const limit = opts?.limit ?? 50;
+  const offset = (page - 1) * limit;
+
+  const conditions = [eq(suppliers.tenantId, tenantId), isNull(suppliers.deletedAt)];
+
+  if (opts?.search) {
+    conditions.push(
+      or(
+        ilike(suppliers.name, `%${opts.search}%`),
+        ilike(suppliers.phone, `%${opts.search}%`),
+        ilike(suppliers.contactPerson, `%${opts.search}%`),
+      )!,
+    );
+  }
+
+  if (opts?.isActive !== undefined) {
+    conditions.push(eq(suppliers.isActive, opts.isActive));
+  }
+
+  const where = and(...conditions);
+
+  const [data, totalResult] = await Promise.all([
+    db.select().from(suppliers).where(where).orderBy(asc(suppliers.name)).limit(limit).offset(offset),
+    db.select({ total: count() }).from(suppliers).where(where),
+  ]);
+
+  return { data, total: totalResult[0]?.total ?? 0, page, limit };
+}
+
+export async function getSupplierById(tenantId: string, supplierId: string) {
+  const [supplier] = await db
+    .select()
+    .from(suppliers)
+    .where(and(eq(suppliers.id, supplierId), eq(suppliers.tenantId, tenantId), isNull(suppliers.deletedAt)));
+
+  if (!supplier) throw new AppError('NOT_FOUND', 'Supplier not found', 404);
+  return supplier;
+}
+
+export async function updateSupplier(
+  tenantId: string,
+  supplierId: string,
+  userId: string,
+  data: Record<string, unknown>,
+) {
+  const [updated] = await db
+    .update(suppliers)
+    .set({ ...data, updatedAt: new Date() })
+    .where(
+      and(eq(suppliers.id, supplierId), eq(suppliers.tenantId, tenantId), isNull(suppliers.deletedAt)),
+    )
+    .returning();
+
+  if (!updated) throw new AppError('NOT_FOUND', 'Supplier not found', 404);
+
+  await auditRepo.log({
+    tenantId,
+    userId,
+    action: 'supplier_updated',
+    entityType: 'supplier',
+    entityId: supplierId,
+    newValue: data,
+  });
+
   return updated;
 }
 
-export async function getSupplierLedger(tenantId: string, supplierId: string, limit = 50, offset = 0) {
-  // Running balance computed via window function — NOT stored
-  const entries = await db.execute(
-    sql`SELECT *, SUM(CAST(debit AS numeric) - CAST(credit AS numeric)) OVER (ORDER BY created_at) AS running_balance
-        FROM ledger_entries
-        WHERE tenant_id = ${tenantId} AND party_type = 'supplier' AND party_id = ${supplierId}
-        ORDER BY created_at DESC
-        LIMIT ${limit + 1} OFFSET ${offset}`
-  );
+export async function deactivateSupplier(tenantId: string, supplierId: string, userId: string) {
+  const [updated] = await db
+    .update(suppliers)
+    .set({ deletedAt: new Date(), isActive: false, updatedAt: new Date() })
+    .where(
+      and(eq(suppliers.id, supplierId), eq(suppliers.tenantId, tenantId), isNull(suppliers.deletedAt)),
+    )
+    .returning({ id: suppliers.id });
 
-  const hasMore = entries.length > limit;
-  if (hasMore) entries.pop();
+  if (!updated) throw new AppError('NOT_FOUND', 'Supplier not found', 404);
 
-  return { entries, hasMore };
-}
-
-export async function recordSupplierPayment(
-  tenantId: string, userId: string, supplierId: string,
-  input: { amount: number; paymentMode: GeneralPaymentMode; paymentReference?: string; description?: string }
-) {
-  return db.transaction(async (tx) => {
-    // Create ledger entry (credit = payment made)
-    const entry = await ledgerService.createEntry(tx, {
-      tenantId,
-      partyType: 'supplier',
-      partyId: supplierId,
-      entryType: 'payment',
-      debit: 0,
-      credit: input.amount,
-      paymentMode: input.paymentMode,
-      paymentReference: input.paymentReference,
-      description: input.description || 'Payment to supplier',
-      createdBy: userId,
-    });
-
-    // Atomic balance decrease
-    await ledgerService.updateSupplierBalance(tx, tenantId, supplierId, -input.amount);
-
-    // If cash payment, add to cash register
-    if (input.paymentMode === 'cash') {
-      const [register] = await tx.select({ id: cashRegisters.id })
-        .from(cashRegisters)
-        .where(and(eq(cashRegisters.tenantId, tenantId), eq(cashRegisters.userId, userId), eq(cashRegisters.status, 'open')))
-        .limit(1);
-
-      if (register) {
-        await tx.insert(cashRegisterEntries).values({
-          registerId: register.id,
-          type: 'supplier_payment',
-          amount: String(-input.amount), // outflow
-          referenceType: 'ledger_entry',
-          referenceId: entry.id,
-          description: `Payment to supplier`,
-        });
-      }
-    }
-
-    return entry;
+  await auditRepo.log({
+    tenantId,
+    userId,
+    action: 'supplier_deactivated',
+    entityType: 'supplier',
+    entityId: supplierId,
   });
 }
 
-export async function getSupplierProducts(tenantId: string, supplierId: string) {
-  // Get distinct products from purchases by this supplier
-  const result = await db.execute(
-    sql`SELECT DISTINCT p.id, p.name, p.sku, p.barcode, p.selling_price, p.cost_price
-        FROM purchase_items pi
-        JOIN purchases pu ON pi.purchase_id = pu.id
-        JOIN products p ON pi.product_id = p.id
-        WHERE pu.tenant_id = ${tenantId} AND pu.supplier_id = ${supplierId} AND p.is_active = true
-        ORDER BY p.name`
+// ──────────────── Ledger ────────────────
+
+export async function getSupplierLedger(
+  tenantId: string,
+  supplierId: string,
+  opts?: { page?: number; limit?: number },
+) {
+  const page = opts?.page ?? 1;
+  const limit = opts?.limit ?? 50;
+  const offset = (page - 1) * limit;
+
+  const where = and(
+    eq(supplierTransactions.tenantId, tenantId),
+    eq(supplierTransactions.supplierId, supplierId),
   );
-  return result;
+
+  const [data, totalResult] = await Promise.all([
+    db
+      .select()
+      .from(supplierTransactions)
+      .where(where)
+      .orderBy(desc(supplierTransactions.createdAt))
+      .limit(limit)
+      .offset(offset),
+    db.select({ total: count() }).from(supplierTransactions).where(where),
+  ]);
+
+  return { data, total: totalResult[0]?.total ?? 0, page, limit };
+}
+
+// ──────────────── Payment Recording ────────────────
+
+export async function recordPayment(
+  tenantId: string,
+  supplierId: string,
+  userId: string,
+  data: { amount: number; paymentMode: string; notes?: string },
+) {
+  return db.transaction(async (tx) => {
+    // Fetch supplier
+    const [supplier] = await tx
+      .select()
+      .from(suppliers)
+      .where(
+        and(eq(suppliers.id, supplierId), eq(suppliers.tenantId, tenantId), isNull(suppliers.deletedAt)),
+      );
+
+    if (!supplier) throw new AppError('NOT_FOUND', 'Supplier not found', 404);
+
+    // Calculate new balance (payment reduces what we owe)
+    const currentBalance = Number(supplier.outstandingBalance);
+    const newBalance = currentBalance - data.amount;
+
+    // Update supplier balance
+    await tx
+      .update(suppliers)
+      .set({
+        outstandingBalance: String(newBalance),
+        updatedAt: new Date(),
+      })
+      .where(eq(suppliers.id, supplierId));
+
+    // Create transaction record
+    const [transaction] = await tx
+      .insert(supplierTransactions)
+      .values({
+        tenantId,
+        supplierId,
+        type: 'payment',
+        amount: String(-data.amount), // Negative = we owe less
+        balanceAfter: String(newBalance),
+        referenceType: 'payment',
+        paymentMode: data.paymentMode,
+        notes: data.notes ?? null,
+        createdBy: userId,
+      })
+      .returning();
+
+    // Audit log
+    await auditRepo.withTransaction(tx).log({
+      tenantId,
+      userId,
+      action: 'supplier_payment_recorded',
+      entityType: 'supplier',
+      entityId: supplierId,
+      newValue: {
+        amount: data.amount,
+        paymentMode: data.paymentMode,
+        previousBalance: currentBalance,
+        newBalance,
+      },
+    });
+
+    return {
+      transactionId: transaction.id,
+      supplierId,
+      amount: data.amount,
+      paymentMode: data.paymentMode,
+      previousBalance: currentBalance,
+      newBalance,
+    };
+  });
 }

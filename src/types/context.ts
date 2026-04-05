@@ -1,20 +1,7 @@
-import type { Context } from 'hono';
+import type { Role } from './enums.js';
 
-export interface TenantContext {
-  tenantId: string;
+export interface AuthContext {
   userId: string;
-  role: 'owner' | 'manager' | 'salesperson';
+  tenantId: string | null; // null for super_admin
+  role: Role;
 }
-
-export interface AdminContext {
-  adminId: string;
-  isSuperAdmin: true;
-}
-
-export type AppContext = Context<{
-  Variables: {
-    tenant: TenantContext;
-    adminUser?: AdminContext;
-    validatedBody?: unknown;
-  };
-}>;

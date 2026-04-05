@@ -1,83 +1,80 @@
 import { Hono } from 'hono';
-import { z } from 'zod';
+import { validate, uuidParam } from '../validators/common.validators.js';
+import {
+  createCustomerSchema,
+  updateCustomerSchema,
+  recordCustomerPaymentSchema,
+  customerListQuerySchema,
+} from '../validators/customer.validators.js';
 import * as customerService from '../services/customer.service.js';
-import { authMiddleware } from '../middleware/auth.js';
-import { tenantScope } from '../middleware/tenant-scope.js';
-import { validate } from '../middleware/validate.js';
-import { success } from '../lib/response.js';
+import { authorize } from '../middleware/rbac.js';
+import { AppError } from '../types/errors.js';
 import type { AppEnv } from '../types/hono.js';
 
-const customersRouter = new Hono<AppEnv>();
-customersRouter.use('*', authMiddleware, tenantScope);
+export const customerRoutes = new Hono<AppEnv>();
 
-// Phone search — must be before /:id
-customersRouter.get('/search', async (c) => {
-  const { tenantId } = c.get('tenant');
-  const phone = c.req.query('phone') || '';
-  const data = await customerService.searchByPhone(tenantId, phone);
-  return c.json(success(data));
+// GET /customers — all roles
+customerRoutes.get('/', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const query = validate(customerListQuerySchema, c.req.query());
+  const result = await customerService.listCustomers(auth.tenantId, query);
+  return c.json({
+    data: result.data,
+    meta: { total: result.total, page: result.page, limit: result.limit, totalPages: Math.ceil(result.total / result.limit) },
+  });
 });
 
-customersRouter.get('/', async (c) => {
-  const { tenantId } = c.get('tenant');
-  const filters = {
-    search: c.req.query('search'),
-    withBalance: c.req.query('with_balance') === 'true',
-    limit: Number(c.req.query('limit')) || 50,
-    offset: Number(c.req.query('offset')) || 0,
-  };
-  const data = await customerService.listCustomers(tenantId, filters);
-  return c.json(success(data));
+// POST /customers — all roles (salesman can quick-add)
+customerRoutes.post('/', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const body = validate(createCustomerSchema, await c.req.json());
+  const customer = await customerService.createCustomer(auth.tenantId, auth.userId, body);
+  return c.json({ data: customer }, 201);
 });
 
-customersRouter.post('/', validate(z.object({
-  name: z.string().min(1),
-  phone: z.string().min(10),
-  email: z.string().email().optional(),
-  address: z.string().optional(),
-})), async (c) => {
-  const { tenantId, userId } = c.get('tenant');
-  const input = c.get('validatedBody') as any;
-  const customer = await customerService.createCustomer(tenantId, userId, input);
-  return c.json(success(customer), 201);
+// GET /customers/:id — all roles
+customerRoutes.get('/:id', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  const customer = await customerService.getCustomerById(auth.tenantId, id);
+  return c.json({ data: customer });
 });
 
-customersRouter.get('/:id', async (c) => {
-  const { tenantId } = c.get('tenant');
-  const customer = await customerService.getCustomerById(tenantId, c.req.param('id')!);
-  return c.json(success(customer));
+// PATCH /customers/:id — all roles
+customerRoutes.patch('/:id', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  const body = validate(updateCustomerSchema, await c.req.json());
+  const customer = await customerService.updateCustomer(auth.tenantId, id, auth.userId, body);
+  return c.json({ data: customer });
 });
 
-customersRouter.put('/:id', validate(z.object({
-  name: z.string().min(1).optional(),
-  phone: z.string().min(10).optional(),
-  email: z.string().email().optional(),
-  address: z.string().optional(),
-}).refine(d => Object.keys(d).length > 0, { message: 'At least one field required' })), async (c) => {
-  const { tenantId } = c.get('tenant');
-  const patch = c.get('validatedBody') as any;
-  const customer = await customerService.updateCustomer(tenantId, c.req.param('id')!, patch);
-  return c.json(success(customer));
+// GET /customers/:id/ledger — Owner, Manager only (per BRD: salesman cannot see khata)
+customerRoutes.get('/:id/ledger', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  const query = c.req.query();
+  const result = await customerService.getCustomerLedger(auth.tenantId, id, {
+    page: query.page ? Number(query.page) : 1,
+    limit: query.limit ? Number(query.limit) : 50,
+  });
+  return c.json({
+    data: result.data,
+    meta: { total: result.total, page: result.page, limit: result.limit },
+  });
 });
 
-customersRouter.get('/:id/ledger', async (c) => {
-  const { tenantId } = c.get('tenant');
-  const limit = Number(c.req.query('limit')) || 50;
-  const offset = Number(c.req.query('offset')) || 0;
-  const data = await customerService.getCustomerLedger(tenantId, c.req.param('id')!, limit, offset);
-  return c.json(success(data));
+// POST /customers/:id/payments — Owner, Manager only
+customerRoutes.post('/:id/payments', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  const body = validate(recordCustomerPaymentSchema, await c.req.json());
+  const result = await customerService.recordPayment(auth.tenantId, id, auth.userId, body);
+  return c.json({ data: result });
 });
-
-customersRouter.post('/:id/payments', validate(z.object({
-  amount: z.number().positive(),
-  paymentMode: z.enum(['cash', 'upi', 'bank_transfer', 'cheque', 'card']),
-  paymentReference: z.string().optional(),
-  description: z.string().optional(),
-})), async (c) => {
-  const { tenantId, userId } = c.get('tenant');
-  const input = c.get('validatedBody') as any;
-  const entry = await customerService.recordCustomerPayment(tenantId, userId, c.req.param('id')!, input);
-  return c.json(success(entry), 201);
-});
-
-export default customersRouter;

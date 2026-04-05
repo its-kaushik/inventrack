@@ -1,40 +1,35 @@
-import { z } from 'zod';
 import 'dotenv/config';
+import { z } from 'zod';
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().default(3000),
-  API_BASE_URL: z.string().url().default('http://localhost:3000'),
 
-  DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
-  DIRECT_URL: z.string().optional().default(''),
+  // Database
+  DATABASE_URL: z.string().url(),
+  // Direct connection (no PgBouncer) — required by pg-boss for LISTEN/NOTIFY.
+  // If not set, falls back to DATABASE_URL.
+  DATABASE_URL_DIRECT: z.string().url().optional(),
 
-  REDIS_URL: z.string().optional().default(''),
+  // JWT
+  JWT_SECRET: z.string().min(32),
+  JWT_ACCESS_EXPIRY: z.string().default('15m'),
+  JWT_REFRESH_EXPIRY: z.string().default('30d'),
 
-  JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters'),
-  JWT_ACCESS_TTL: z.coerce.number().default(900),
-  JWT_REFRESH_TTL: z.coerce.number().default(604800),
+  // S3 / Cloudflare R2
+  S3_BUCKET: z.string(),
+  S3_REGION: z.string().default('auto'),
+  S3_ACCESS_KEY: z.string(),
+  S3_SECRET_KEY: z.string(),
+  S3_ENDPOINT: z.string().url(),
+  S3_PUBLIC_URL: z.string().url(),
 
-  S3_ENDPOINT: z.string().optional().default(''),
-  S3_BUCKET: z.string().optional().default('inventrack'),
-  S3_ACCESS_KEY: z.string().optional().default(''),
-  S3_SECRET_KEY: z.string().optional().default(''),
-  S3_REGION: z.string().optional().default('us-east-1'),
+  // CORS
+  CORS_ORIGIN: z.string().default('http://localhost:5173'),
 
-  SMTP_HOST: z.string().optional().default(''),
-  SMTP_PORT: z.coerce.number().optional().default(587),
-  SMTP_USER: z.string().optional().default(''),
-  SMTP_PASS: z.string().optional().default(''),
-
-  CORS_ORIGINS: z.string().optional().default(''),
+  // Logging
+  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 });
 
-const parsed = envSchema.safeParse(process.env);
-
-if (!parsed.success) {
-  // Logger not yet available — env validation must use console
-  console.error('Invalid environment variables:', parsed.error.flatten().fieldErrors);
-  process.exit(1);
-}
-
-export const env = parsed.data;
+export const env = envSchema.parse(process.env);
+export type Env = z.infer<typeof envSchema>;

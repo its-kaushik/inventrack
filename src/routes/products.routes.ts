@@ -1,156 +1,213 @@
 import { Hono } from 'hono';
-import { z } from 'zod';
+import { validate, uuidParam } from '../validators/common.validators.js';
+import {
+  createCategorySchema,
+  updateCategorySchema,
+  createBrandSchema,
+  updateBrandSchema,
+  createProductSchema,
+  updateProductSchema,
+  productListQuerySchema,
+} from '../validators/product.validators.js';
 import * as productService from '../services/product.service.js';
-import * as barcodeService from '../services/barcode.service.js';
-import { authMiddleware } from '../middleware/auth.js';
-import { tenantScope } from '../middleware/tenant-scope.js';
-import { requireRole } from '../middleware/rbac.js';
-import { validate } from '../middleware/validate.js';
-import { success, paginated } from '../lib/response.js';
+import { authorize } from '../middleware/rbac.js';
+import { AppError } from '../types/errors.js';
+import { enqueueJob } from '../jobs/worker.js';
+import { getUploadUrl } from '../lib/s3-client.js';
+import { db } from '../db/client.js';
+import { productImages } from '../db/schema/products.js';
+import { eq, and } from 'drizzle-orm';
+import { nanoid } from 'nanoid';
 import type { AppEnv } from '../types/hono.js';
 
-const productsRouter = new Hono<AppEnv>();
+export const productRoutes = new Hono<AppEnv>();
 
-productsRouter.use('*', authMiddleware, tenantScope);
+// ──────── Categories ────────
 
-// POS search — must be before /:id to avoid route conflict
-productsRouter.get('/search', async (c) => {
-  const { tenantId, role } = c.get('tenant');
-  const query = c.req.query('q') || '';
-  const results = await productService.searchProducts(tenantId, query);
-  return c.json(success(productService.serializeProducts(results, role)));
+productRoutes.get('/categories', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const cats = await productService.listCategories(auth.tenantId);
+  return c.json({ data: cats });
 });
 
-productsRouter.get('/', async (c) => {
-  const { tenantId, role } = c.get('tenant');
-  const filters = {
-    categoryId: c.req.query('category_id'),
-    brandId: c.req.query('brand_id'),
-    search: c.req.query('search'),
-    updatedAfter: c.req.query('updated_after'),
-    isActive: c.req.query('is_active') === 'false' ? false : undefined,
-    limit: Number(c.req.query('limit')) || 20,
-    offset: Number(c.req.query('offset')) || 0,
+productRoutes.post('/categories', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const body = validate(createCategorySchema, await c.req.json());
+  const cat = await productService.createCategory(auth.tenantId, body);
+  return c.json({ data: cat }, 201);
+});
+
+productRoutes.patch('/categories/:id', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  const body = validate(updateCategorySchema, await c.req.json());
+  const cat = await productService.updateCategory(auth.tenantId, id, body);
+  return c.json({ data: cat });
+});
+
+productRoutes.delete('/categories/:id', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  await productService.deleteCategory(auth.tenantId, id);
+  return c.json({ data: { message: 'Category deleted' } });
+});
+
+// ──────── Brands ────────
+
+productRoutes.get('/brands', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const brandsList = await productService.listBrands(auth.tenantId);
+  return c.json({ data: brandsList });
+});
+
+productRoutes.post('/brands', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const body = validate(createBrandSchema, await c.req.json());
+  const brand = await productService.createBrand(auth.tenantId, body.name);
+  return c.json({ data: brand }, 201);
+});
+
+productRoutes.patch('/brands/:id', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  const body = validate(updateBrandSchema, await c.req.json());
+  const brand = await productService.updateBrand(auth.tenantId, id, body.name);
+  return c.json({ data: brand });
+});
+
+productRoutes.delete('/brands/:id', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  await productService.deleteBrand(auth.tenantId, id);
+  return c.json({ data: { message: 'Brand deleted' } });
+});
+
+// ──────── Products ────────
+
+productRoutes.get('/', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const query = validate(productListQuerySchema, c.req.query());
+  const result = await productService.listProducts(auth.tenantId, query);
+  return c.json({
+    data: result.data,
+    meta: { total: result.total, page: result.page, limit: result.limit, totalPages: Math.ceil(result.total / result.limit) },
+  });
+});
+
+productRoutes.get('/:id', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  const product = await productService.getProductById(auth.tenantId, id);
+  return c.json({ data: product });
+});
+
+productRoutes.post('/', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const body = validate(createProductSchema, await c.req.json());
+  const product = await productService.createProduct(auth.tenantId, auth.userId, body);
+  return c.json({ data: product }, 201);
+});
+
+productRoutes.patch('/:id', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  const body = validate(updateProductSchema, await c.req.json());
+  const product = await productService.updateProduct(auth.tenantId, id, body);
+  return c.json({ data: product });
+});
+
+productRoutes.delete('/:id', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  await productService.archiveProduct(auth.tenantId, id);
+  return c.json({ data: { message: 'Product archived' } });
+});
+
+productRoutes.post('/:id/unarchive', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id } = validate(uuidParam, c.req.param());
+  await productService.unarchiveProduct(auth.tenantId, id);
+  return c.json({ data: { message: 'Product unarchived' } });
+});
+
+// ──────── Product Images ────────
+
+productRoutes.post('/:id/images/upload-url', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id: productId } = validate(uuidParam, c.req.param());
+  const { contentType } = await c.req.json() as { contentType: string };
+
+  const ext = contentType === 'image/png' ? 'png' : contentType === 'image/webp' ? 'webp' : 'jpg';
+  const key = `${auth.tenantId}/products/${productId}/${nanoid()}.${ext}`;
+  const result = await getUploadUrl(key, contentType);
+  return c.json({ data: result });
+});
+
+productRoutes.post('/:id/images', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const { id: productId } = validate(uuidParam, c.req.param());
+  const { key, publicUrl, variantId, sortOrder } = await c.req.json() as {
+    key: string; publicUrl: string; variantId?: string; sortOrder?: number;
   };
 
-  const result = await productService.listProducts(tenantId, filters);
-  return c.json(
-    paginated(
-      productService.serializeProducts(result.items, role),
-      result.hasMore ? String(result.offset) : null,
-      result.hasMore,
-    ),
-  );
+  const [image] = await db
+    .insert(productImages)
+    .values({
+      tenantId: auth.tenantId,
+      productId,
+      variantId: variantId ?? null,
+      imageUrl: publicUrl,
+      sortOrder: sortOrder ?? 0,
+    })
+    .returning();
+
+  // Enqueue background resize job
+  await enqueueJob('resize-product-image', { s3Key: key, productImageId: image.id });
+
+  return c.json({ data: image }, 201);
 });
 
-productsRouter.get('/:id', async (c) => {
-  const { tenantId, role } = c.get('tenant');
-  const id = c.req.param('id')!;
-  const product = await productService.getProductById(tenantId, id);
-  return c.json(success(productService.serializeProduct(product, role)));
+productRoutes.delete('/:id/images/:imageId', authorize('owner', 'manager'), async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const productId = c.req.param('id');
+  const imageId = c.req.param('imageId');
+
+  const [deleted] = await db
+    .delete(productImages)
+    .where(
+      and(
+        eq(productImages.id, imageId),
+        eq(productImages.productId, productId),
+        eq(productImages.tenantId, auth.tenantId),
+      ),
+    )
+    .returning({ id: productImages.id });
+
+  if (!deleted) throw new AppError('NOT_FOUND', 'Image not found', 404);
+  return c.json({ data: { message: 'Image deleted' } });
 });
 
-const createProductSchema = z.object({
-  name: z.string().min(1),
-  sku: z.string().min(1).max(50),
-  barcode: z.string().max(50).optional(),
-  categoryId: z.string().uuid(),
-  subTypeId: z.string().uuid().optional(),
-  brandId: z.string().uuid().optional(),
-  size: z.string().max(20).optional(),
-  color: z.string().max(50).optional(),
-  hsnCode: z.string().max(8).optional(),
-  gstRate: z.number().min(0).max(100).optional(),
-  sellingPrice: z.number().positive(),
-  costPrice: z.number().min(0).optional(),
-  mrp: z.number().positive().optional(),
-  catalogDiscountPct: z.number().min(0).max(100).optional(),
-  minStockLevel: z.number().int().min(0).optional(),
-  reorderPoint: z.number().int().min(0).optional(),
-  description: z.string().optional(),
-  imageUrls: z.array(z.string()).optional(),
+// ──────── HSN Codes ────────
+
+productRoutes.get('/hsn-codes', async (c) => {
+  const search = c.req.query('search') ?? '';
+  const codes = await productService.searchHsnCodes(search);
+  return c.json({ data: codes });
 });
-
-productsRouter.post(
-  '/',
-  requireRole('owner', 'manager'),
-  validate(createProductSchema),
-  async (c) => {
-    const { tenantId, role } = c.get('tenant');
-    const input = c.get('validatedBody') as z.infer<typeof createProductSchema>;
-    const product = await productService.createProduct(tenantId, input);
-    return c.json(success(productService.serializeProduct(product, role)), 201);
-  },
-);
-
-const updateProductSchema = z
-  .object({
-    name: z.string().min(1).optional(),
-    sku: z.string().min(1).max(50).optional(),
-    barcode: z.string().max(50).optional(),
-    categoryId: z.string().uuid().optional(),
-    subTypeId: z.string().uuid().nullable().optional(),
-    brandId: z.string().uuid().nullable().optional(),
-    size: z.string().max(20).nullable().optional(),
-    color: z.string().max(50).nullable().optional(),
-    hsnCode: z.string().max(8).optional(),
-    gstRate: z.number().min(0).max(100).optional(),
-    sellingPrice: z.number().positive().optional(),
-    costPrice: z.number().min(0).optional(),
-    mrp: z.number().positive().nullable().optional(),
-    catalogDiscountPct: z.number().min(0).max(100).optional(),
-    minStockLevel: z.number().int().min(0).optional(),
-    reorderPoint: z.number().int().min(0).nullable().optional(),
-    description: z.string().nullable().optional(),
-    imageUrls: z.array(z.string()).optional(),
-  })
-  .refine((d) => Object.keys(d).length > 0, { message: 'At least one field required' });
-
-productsRouter.put(
-  '/:id',
-  requireRole('owner', 'manager'),
-  validate(updateProductSchema),
-  async (c) => {
-    const { tenantId, role } = c.get('tenant');
-    const id = c.req.param('id')!;
-    const patch = c.get('validatedBody') as Record<string, unknown>;
-    const product = await productService.updateProduct(tenantId, id, patch);
-    return c.json(success(productService.serializeProduct(product, role)));
-  },
-);
-
-// Soft-delete only — NEVER hard delete
-productsRouter.delete('/:id', requireRole('owner'), async (c) => {
-  const { tenantId } = c.get('tenant');
-  const id = c.req.param('id')!;
-  const result = await productService.softDeleteProduct(tenantId, id);
-  return c.json(success(result));
-});
-
-productsRouter.post('/:id/barcode', requireRole('owner', 'manager'), async (c) => {
-  const { tenantId } = c.get('tenant');
-  const id = c.req.param('id')!;
-  const product = await productService.getProductById(tenantId, id);
-  const png = await barcodeService.generateBarcode(product.barcode || product.sku);
-
-  c.header('Content-Type', 'image/png');
-  c.header('Content-Disposition', `inline; filename="${product.sku}.png"`);
-  return c.body(png as any);
-});
-
-// Bulk import stub (real implementation needs BullMQ — Phase 2)
-productsRouter.post('/import', requireRole('owner', 'manager'), async (c) => {
-  return c.json(
-    success({ message: 'Bulk import coming soon. Use POST /products for individual creation.' }),
-  );
-});
-
-// Import job status (stub — will poll BullMQ when implemented)
-productsRouter.get('/import/:jobId/status', requireRole('owner', 'manager'), async (c) => {
-  const jobId = c.req.param('jobId')!;
-  return c.json(
-    success({ jobId, status: 'not_implemented', message: 'Import jobs not yet available.' }),
-  );
-});
-
-export default productsRouter;

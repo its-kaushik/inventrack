@@ -1,8 +1,18 @@
-import { pgTable, uuid, varchar, text, smallint, boolean, jsonb, timestamp, pgEnum } from 'drizzle-orm/pg-core';
+import {
+  pgTable,
+  uuid,
+  varchar,
+  text,
+  boolean,
+  integer,
+  numeric,
+  timestamp,
+  uniqueIndex,
+  pgEnum,
+} from 'drizzle-orm/pg-core';
 
-export const gstSchemeEnum = pgEnum('gst_scheme_type', ['regular', 'composition']);
+export const gstSchemeEnum = pgEnum('gst_scheme', ['composite', 'regular']);
 export const tenantStatusEnum = pgEnum('tenant_status', ['active', 'suspended', 'deleted']);
-export const tenantPlanEnum = pgEnum('tenant_plan', ['free', 'basic', 'pro']);
 
 export const tenants = pgTable('tenants', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -10,15 +20,38 @@ export const tenants = pgTable('tenants', {
   address: text('address'),
   phone: varchar('phone', { length: 15 }),
   email: varchar('email', { length: 255 }),
-  logoUrl: varchar('logo_url', { length: 500 }),
   gstin: varchar('gstin', { length: 15 }),
-  gstScheme: gstSchemeEnum('gst_scheme').notNull().default('regular'),
-  financialYearStart: smallint('financial_year_start').notNull().default(4),
-  invoicePrefix: varchar('invoice_prefix', { length: 10 }).notNull().default('INV'),
-  settings: jsonb('settings').notNull().default({}),
-  setupComplete: boolean('setup_complete').notNull().default(false),
+  logoUrl: text('logo_url'),
+  gstScheme: gstSchemeEnum('gst_scheme').notNull().default('composite'),
+  currency: varchar('currency', { length: 3 }).notNull().default('INR'),
   status: tenantStatusEnum('status').notNull().default('active'),
-  plan: tenantPlanEnum('plan').notNull().default('free'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const tenantSettings = pgTable(
+  'tenant_settings',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    defaultBillDiscountPct: numeric('default_bill_discount_pct', { precision: 5, scale: 2 })
+      .notNull()
+      .default('15.00'),
+    maxDiscountPct: numeric('max_discount_pct', { precision: 5, scale: 2 })
+      .notNull()
+      .default('30.00'),
+    returnWindowDays: integer('return_window_days').notNull().default(7),
+    shelfAgingThresholdDays: integer('shelf_aging_threshold_days').notNull().default(90),
+    billNumberPrefix: varchar('bill_number_prefix', { length: 10 }).notNull().default('INV'),
+    receiptFooterMessage: text('receipt_footer_message').notNull().default(
+      'Thank you for shopping with us!',
+    ),
+    receiptShowReturnPolicy: boolean('receipt_show_return_policy').notNull().default(true),
+    voidWindowHours: integer('void_window_hours').notNull().default(24),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex('idx_tenant_settings_tenant').on(table.tenantId)],
+);

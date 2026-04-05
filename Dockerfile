@@ -1,22 +1,20 @@
 # Stage 1: Build
-FROM node:22-alpine AS builder
+FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --ignore-scripts
-COPY tsconfig.json tsup.config.ts* ./
+RUN npm ci
+COPY tsconfig.json ./
 COPY src/ ./src/
-COPY drizzle.config.ts ./
-RUN npx tsup src/server.ts --format esm --outDir dist
+RUN npm run build
 
-# Stage 2: Run
-FROM node:22-alpine
+# Stage 2: Production
+FROM node:20-alpine
 WORKDIR /app
+COPY package*.json ./
+RUN npm ci --production
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./
 COPY --from=builder /app/src/db/migrations ./src/db/migrations
 
 EXPOSE 3000
-ENV NODE_ENV=production
-
-CMD ["node", "dist/server.js"]
+HEALTHCHECK --interval=30s --timeout=5s CMD wget -qO- http://localhost:3000/health || exit 1
+CMD ["node", "dist/index.js"]

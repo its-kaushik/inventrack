@@ -1,173 +1,117 @@
 import { eq } from 'drizzle-orm';
-import bcrypt from 'bcryptjs';
-import { db } from '../config/database.js';
-import { tenants } from '../db/schema/tenants.js';
-import { users } from '../db/schema/users.js';
-import { categories } from '../db/schema/categories.js';
-import { sizeSystems } from '../db/schema/categories.js';
-import { defaultCategories, defaultSizeSystems } from '../db/seed/defaults.js';
-import { DEFAULT_TENANT_SETTINGS } from '../lib/constants.js';
-import { NotFoundError } from '../lib/errors.js';
+import { db } from '../db/client.js';
+import { tenants, tenantSettings } from '../db/schema/tenants.js';
+import { AppError } from '../types/errors.js';
+import { AuditRepository } from '../repositories/audit.repository.js';
+import type { GstScheme, TenantStatus } from '../types/enums.js';
 
-interface CreateTenantInput {
-  storeName: string;
-  ownerName: string;
-  phone: string;
-  password: string;
-  email?: string;
+const auditRepo = new AuditRepository(db);
+
+export async function createTenant(data: {
+  name: string;
   address?: string;
+  phone?: string;
+  email?: string;
   gstin?: string;
-  gstScheme?: 'regular' | 'composition';
-}
-
-export async function createTenant(input: CreateTenantInput) {
-  const passwordHash = await bcrypt.hash(input.password, 12);
-
-  // Use raw SQL transaction for atomicity across multiple inserts
-  const result = await db.transaction(async (tx) => {
-    // 1. Create tenant
+  gstScheme?: GstScheme;
+}) {
+  return db.transaction(async (tx) => {
+    // Create tenant
     const [tenant] = await tx
       .insert(tenants)
       .values({
-        name: input.storeName,
-        address: input.address,
-        phone: input.phone,
-        email: input.email,
-        gstin: input.gstin,
-        gstScheme: input.gstScheme || 'regular',
-        settings: DEFAULT_TENANT_SETTINGS,
+        name: data.name,
+        address: data.address ?? null,
+        phone: data.phone ?? null,
+        email: data.email ?? null,
+        gstin: data.gstin ?? null,
+        gstScheme: data.gstScheme ?? 'composite',
       })
       .returning();
 
-    // 2. Create owner user
-    const [owner] = await tx
-      .insert(users)
-      .values({
-        tenantId: tenant.id,
-        name: input.ownerName,
-        phone: input.phone,
-        email: input.email,
-        passwordHash,
-        role: 'owner',
-      })
-      .returning({
-        id: users.id,
-        tenantId: users.tenantId,
-        name: users.name,
-        phone: users.phone,
-        email: users.email,
-        role: users.role,
-      });
+    // Auto-create tenant settings with defaults
+    const [settings] = await tx
+      .insert(tenantSettings)
+      .values({ tenantId: tenant.id })
+      .returning();
 
-    // 3. Seed default categories
-    for (const cat of defaultCategories) {
-      await tx.insert(categories).values({
-        tenantId: tenant.id,
-        name: cat.name,
-        code: cat.code,
-        sortOrder: cat.sortOrder,
-      });
-    }
+    await auditRepo.withTransaction(tx).log({
+      tenantId: tenant.id,
+      action: 'tenant_created',
+      entityType: 'tenant',
+      entityId: tenant.id,
+      newValue: { name: data.name },
+    });
 
-    // 4. Seed default size systems
-    for (const ss of defaultSizeSystems) {
-      await tx.insert(sizeSystems).values({
-        tenantId: tenant.id,
-        name: ss.name,
-        values: ss.values,
-      });
-    }
+    return { ...tenant, settings };
+  });
+}
 
-    return { tenant, owner };
+export async function listTenants() {
+  return db.select().from(tenants);
+}
+
+export async function getTenantById(tenantId: string) {
+  const [tenant] = await db.select().from(tenants).where(eq(tenants.id, tenantId));
+  if (!tenant) throw new AppError('NOT_FOUND', 'Tenant not found', 404);
+
+  const [settings] = await db
+    .select()
+    .from(tenantSettings)
+    .where(eq(tenantSettings.tenantId, tenantId));
+
+  return { ...tenant, settings };
+}
+
+export async function updateTenant(
+  tenantId: string,
+  data: {
+    name?: string;
+    address?: string;
+    phone?: string;
+    email?: string;
+    gstin?: string;
+    logoUrl?: string;
+  },
+) {
+  const [updated] = await db
+    .update(tenants)
+    .set({ ...data, updatedAt: new Date() })
+    .where(eq(tenants.id, tenantId))
+    .returning();
+
+  if (!updated) throw new AppError('NOT_FOUND', 'Tenant not found', 404);
+
+  await auditRepo.log({
+    tenantId,
+    action: 'tenant_updated',
+    entityType: 'tenant',
+    entityId: tenantId,
+    newValue: data,
   });
 
-  return result;
+  return updated;
 }
 
-export async function completeSetup(tenantId: string) {
+export async function updateTenantStatus(tenantId: string, status: TenantStatus) {
   const [updated] = await db
     .update(tenants)
-    .set({ setupComplete: true })
+    .set({ status, updatedAt: new Date() })
     .where(eq(tenants.id, tenantId))
     .returning();
 
-  if (!updated) throw new NotFoundError('Tenant', tenantId);
-  return updated;
-}
+  if (!updated) throw new AppError('NOT_FOUND', 'Tenant not found', 404);
 
-export async function getSettings(tenantId: string) {
-  const [tenant] = await db
-    .select({
-      settings: tenants.settings,
-      gstScheme: tenants.gstScheme,
-      setupComplete: tenants.setupComplete,
-    })
-    .from(tenants)
-    .where(eq(tenants.id, tenantId))
-    .limit(1);
-
-  if (!tenant) throw new NotFoundError('Tenant', tenantId);
-  return tenant;
-}
-
-export async function updateSettings(tenantId: string, patch: Record<string, unknown>) {
-  const [current] = await db
-    .select({ settings: tenants.settings })
-    .from(tenants)
-    .where(eq(tenants.id, tenantId))
-    .limit(1);
-
-  if (!current) throw new NotFoundError('Tenant', tenantId);
-
-  const merged = { ...(current.settings as Record<string, unknown>), ...patch };
-
-  const [updated] = await db
-    .update(tenants)
-    .set({ settings: merged })
-    .where(eq(tenants.id, tenantId))
-    .returning();
+  await auditRepo.log({
+    tenantId,
+    action: `tenant_${status}`,
+    entityType: 'tenant',
+    entityId: tenantId,
+  });
 
   return updated;
 }
 
-export async function getStore(tenantId: string) {
-  const [tenant] = await db
-    .select({
-      id: tenants.id,
-      name: tenants.name,
-      address: tenants.address,
-      phone: tenants.phone,
-      email: tenants.email,
-      logoUrl: tenants.logoUrl,
-      gstin: tenants.gstin,
-      gstScheme: tenants.gstScheme,
-      financialYearStart: tenants.financialYearStart,
-      invoicePrefix: tenants.invoicePrefix,
-    })
-    .from(tenants)
-    .where(eq(tenants.id, tenantId))
-    .limit(1);
-
-  if (!tenant) throw new NotFoundError('Tenant', tenantId);
-  return tenant;
-}
-
-export async function updateStore(
-  tenantId: string,
-  patch: Partial<{
-    name: string;
-    address: string;
-    phone: string;
-    email: string;
-    logoUrl: string;
-    gstin: string;
-    gstScheme: 'regular' | 'composition';
-    financialYearStart: number;
-    invoicePrefix: string;
-  }>,
-) {
-  const [updated] = await db.update(tenants).set(patch).where(eq(tenants.id, tenantId)).returning();
-
-  if (!updated) throw new NotFoundError('Tenant', tenantId);
-  return updated;
+export async function deleteTenant(tenantId: string) {
+  return updateTenantStatus(tenantId, 'deleted');
 }

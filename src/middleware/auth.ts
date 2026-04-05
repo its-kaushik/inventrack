@@ -1,41 +1,32 @@
 import { createMiddleware } from 'hono/factory';
-import { jwtVerify } from 'jose';
-import { env } from '../config/env.js';
-import { AuthError } from '../lib/errors.js';
-import type { TenantContext, AdminContext } from '../types/context.js';
+import { verifyAccessToken } from '../services/auth.service.js';
+import { AppError } from '../types/errors.js';
+import type { AppEnv } from '../types/hono.js';
 
-const secret = new TextEncoder().encode(env.JWT_SECRET);
+const PUBLIC_PATHS = new Set([
+  '/api/v1/auth/login',
+  '/api/v1/auth/refresh',
+  '/api/v1/auth/logout',
+  '/api/v1/auth/forgot-password',
+  '/api/v1/auth/reset-password',
+]);
 
-export const authMiddleware = createMiddleware(async (c, next) => {
-  const authHeader = c.req.header('authorization');
+export const authMiddleware = () =>
+  createMiddleware<AppEnv>(async (c, next) => {
+    if (PUBLIC_PATHS.has(c.req.path)) return next();
 
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    throw new AuthError('Missing or invalid authorization header');
-  }
+    const header = c.req.header('Authorization');
+    if (!header?.startsWith('Bearer '))
+      throw new AppError('UNAUTHORIZED', 'Missing or invalid authorization header', 401);
 
-  const token = authHeader.slice(7);
+    const token = header.slice(7);
+    const payload = await verifyAccessToken(token);
 
-  try {
-    const { payload } = await jwtVerify(token, secret);
+    c.set('auth', {
+      userId: payload.userId,
+      tenantId: payload.tenantId,
+      role: payload.role,
+    });
 
-    // Super admin tokens have role='super_admin' and no tenant ID
-    if (payload.role === 'super_admin') {
-      const adminContext: AdminContext = {
-        adminId: payload.sub as string,
-        isSuperAdmin: true,
-      };
-      c.set('adminUser', adminContext);
-    } else {
-      const tenantContext: TenantContext = {
-        userId: payload.sub as string,
-        tenantId: payload.tid as string,
-        role: payload.role as TenantContext['role'],
-      };
-      c.set('tenant', tenantContext);
-    }
-  } catch {
-    throw new AuthError('Invalid or expired token');
-  }
-
-  await next();
-});
+    await next();
+  });
