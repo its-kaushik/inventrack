@@ -1,18 +1,13 @@
 import { eq, and } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { productVariants } from '../db/schema/products.js';
+import { notify } from '../services/notification.service.js';
 
 export interface CheckLowStockData {
   tenantId: string;
   variantId: string;
 }
 
-/**
- * Check if a variant has fallen below its low stock threshold.
- * If so, creates a notification (notification table built in M19).
- *
- * For now (pre-M19), this is a no-op stub that logs the check.
- */
 export async function handleCheckLowStock(data: CheckLowStockData): Promise<void> {
   const [variant] = await db
     .select({
@@ -29,9 +24,13 @@ export async function handleCheckLowStock(data: CheckLowStockData): Promise<void
   if (!variant || variant.lowStockThreshold === null) return;
 
   if (variant.availableQuantity <= variant.lowStockThreshold) {
-    // TODO (M19): Create notification record when notifications table exists
-    console.info(
-      `[check-low-stock] ⚠ ${variant.sku}: stock ${variant.availableQuantity} <= threshold ${variant.lowStockThreshold}`,
-    );
+    await notify(data.tenantId, {
+      type: 'low_stock',
+      title: 'Low Stock Alert',
+      message: `${variant.sku} has only ${variant.availableQuantity} units left (threshold: ${variant.lowStockThreshold})`,
+      priority: 'high',
+      data: { variantId: variant.id, sku: variant.sku, stock: variant.availableQuantity, threshold: variant.lowStockThreshold },
+      targetRoles: ['owner', 'manager', 'salesman'],
+    });
   }
 }

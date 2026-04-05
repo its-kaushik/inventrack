@@ -25,7 +25,31 @@ export async function startWorker(): Promise<PgBoss> {
     await handleCheckLowStock(job.data as any);
   });
 
-  console.info('[pg-boss] Worker started');
+  // Cron job handlers (all with singletonKey for horizontal scaling safety)
+  const { handleCheckShelfAging } = await import('./check-shelf-aging.js');
+  const { handleCheckCreditOverdue } = await import('./check-credit-overdue.js');
+  const { handleGenerateDailySummary } = await import('./generate-daily-summary.js');
+  const { handleCleanParkedBills } = await import('./clean-parked-bills.js');
+  const { handleCleanExpiredTokens } = await import('./clean-expired-tokens.js');
+  const { handleCleanOldNotifications } = await import('./clean-old-notifications.js');
+
+  // Schedule cron jobs
+  await boss.schedule('check-shelf-aging', '0 0 * * *', {}, { singletonKey: 'check-shelf-aging' }); // midnight daily
+  await boss.schedule('generate-daily-summary', '0 21 * * *', {}, { singletonKey: 'generate-daily-summary' }); // 9 PM daily
+  await boss.schedule('check-credit-overdue', '0 8 * * *', {}, { singletonKey: 'check-credit-overdue' }); // 8 AM daily
+  await boss.schedule('clean-parked-bills', '0 * * * *', {}, { singletonKey: 'clean-parked-bills' }); // hourly
+  await boss.schedule('clean-expired-tokens', '0 3 * * *', {}, { singletonKey: 'clean-expired-tokens' }); // 3 AM daily
+  await boss.schedule('clean-old-notifications', '0 4 * * 0', {}, { singletonKey: 'clean-old-notifications' }); // 4 AM Sunday
+
+  // Register cron job workers
+  await boss.work('check-shelf-aging', async () => { await handleCheckShelfAging(); });
+  await boss.work('generate-daily-summary', async () => { await handleGenerateDailySummary(); });
+  await boss.work('check-credit-overdue', async () => { await handleCheckCreditOverdue(); });
+  await boss.work('clean-parked-bills', async () => { await handleCleanParkedBills(); });
+  await boss.work('clean-expired-tokens', async () => { await handleCleanExpiredTokens(); });
+  await boss.work('clean-old-notifications', async () => { await handleCleanOldNotifications(); });
+
+  console.info('[pg-boss] Worker started with 8 job handlers + 6 cron schedules');
   return boss;
 }
 

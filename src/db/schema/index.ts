@@ -11,3 +11,4 @@ export * from './sync.js';
 export * from './expenses.js';
 export * from './cash-register.js';
 export * from './returns.js';
+export * from './notifications.js';
