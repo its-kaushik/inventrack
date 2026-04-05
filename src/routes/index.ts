@@ -15,6 +15,7 @@ import { creditRoutes } from './credit.routes.js';
 import { expenseRoutes } from './expenses.routes.js';
 import { cashRegisterRoutes } from './cash-register.routes.js';
 import { reportRoutes } from './reports.routes.js';
+import { migrationRoutes } from './migration.routes.js';
 import type { AppEnv } from '../types/hono.js';
 
 export const routes = new Hono<AppEnv>();
@@ -35,3 +36,4 @@ routes.route('/credit', creditRoutes);
 routes.route('/expenses', expenseRoutes);
 routes.route('/cash-register', cashRegisterRoutes);
 routes.route('/reports', reportRoutes);
+routes.route('/migration', migrationRoutes);
