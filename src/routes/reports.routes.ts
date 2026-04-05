@@ -191,3 +191,41 @@ reportRoutes.get('/hsn-summary', async (c) => {
   if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
   return c.json({ data: await reportService.getHsnSummary(auth.tenantId, withDateRange(c)) });
 });
+
+// ── GST Return Exports (M21) ──
+
+reportRoutes.get('/gstr1-export', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const result = await reportService.getGstr1Export(auth.tenantId, withDateRange(c));
+  return new Response(result.csv, {
+    headers: {
+      'Content-Type': 'text/csv',
+      'Content-Disposition': `attachment; filename="gstr1-${Date.now()}.csv"`,
+    },
+  });
+});
+
+reportRoutes.get('/gstr3b-export', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const result = await reportService.getGstr3bExport(auth.tenantId, withDateRange(c));
+  return new Response(result.csv, {
+    headers: {
+      'Content-Type': 'text/csv',
+      'Content-Disposition': `attachment; filename="gstr3b-${Date.now()}.csv"`,
+    },
+  });
+});
+
+reportRoutes.get('/cmp08-export', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const result = await reportService.getCmp08Export(auth.tenantId, withDateRange(c));
+  return new Response(result.csv, {
+    headers: {
+      'Content-Type': 'text/csv',
+      'Content-Disposition': `attachment; filename="cmp08-${Date.now()}.csv"`,
+    },
+  });
+});

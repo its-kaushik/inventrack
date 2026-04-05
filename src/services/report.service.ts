@@ -702,3 +702,138 @@ export async function getHsnSummary(tenantId: string, opts?: { from?: string; to
   `));
   return { data: (data as any[]).map((r: any) => ({ hsnCode: r.hsn_code, qty: Number(r.qty), taxableValue: Number(r.taxable_value), cgst: Number(r.cgst), sgst: Number(r.sgst), igst: Number(r.igst) })) };
 }
+
+// ──────────────── GST Return Exports (M21) ────────────────
+
+function toCsvString(headers: string[], rows: string[][]): string {
+  const lines = [headers.join(',')];
+  for (const row of rows) {
+    lines.push(row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','));
+  }
+  return lines.join('\n');
+}
+
+/**
+ * GSTR-1: Outward supply details
+ * B2B invoices (customer GSTIN), B2C consolidated
+ */
+export async function getGstr1Export(tenantId: string, opts?: { from?: string; to?: string }) {
+  const df = dateFilter(opts?.from, opts?.to);
+
+  // B2B: Sales to customers with GSTIN
+  const b2b = await db.execute(sql.raw(`
+    SELECT s.bill_number, s.created_at as invoice_date, c.gstin as customer_gstin, c.name as customer_name,
+      s.subtotal_taxable::numeric as taxable_value, s.total_cgst::numeric as cgst,
+      s.total_sgst::numeric as sgst, s.total_igst::numeric as igst, s.net_payable::numeric as total
+    FROM sales s INNER JOIN customers c ON s.customer_id = c.id
+    WHERE s.tenant_id = '${tenantId}' AND s.status = 'completed' AND s.gst_scheme = 'regular'
+      AND c.gstin IS NOT NULL AND c.gstin != '' ${df}
+    ORDER BY s.created_at
+  `));
+
+  // B2C: Sales to customers without GSTIN
+  const [b2c] = await db.execute(sql.raw(`
+    SELECT COUNT(*)::int as invoice_count,
+      COALESCE(SUM(subtotal_taxable::numeric), 0) as taxable_value,
+      COALESCE(SUM(total_cgst::numeric), 0) as cgst,
+      COALESCE(SUM(total_sgst::numeric), 0) as sgst,
+      COALESCE(SUM(net_payable::numeric), 0) as total
+    FROM sales s INNER JOIN customers c ON s.customer_id = c.id
+    WHERE s.tenant_id = '${tenantId}' AND s.status = 'completed' AND s.gst_scheme = 'regular'
+      AND (c.gstin IS NULL OR c.gstin = '') ${df}
+  `));
+
+  // Generate CSV
+  const b2bHeaders = ['Invoice Number', 'Invoice Date', 'Customer GSTIN', 'Customer Name', 'Taxable Value', 'CGST', 'SGST', 'IGST', 'Invoice Value'];
+  const b2bRows = (b2b as any[]).map((r: any) => [
+    r.bill_number, new Date(r.invoice_date).toISOString().split('T')[0],
+    r.customer_gstin, r.customer_name,
+    String(Number(r.taxable_value)), String(Number(r.cgst)), String(Number(r.sgst)), String(Number(r.igst)), String(Number(r.total)),
+  ]);
+
+  const csv = toCsvString(b2bHeaders, b2bRows);
+  const b2cSummary = {
+    invoiceCount: Number((b2c as any)?.invoice_count ?? 0),
+    taxableValue: Number((b2c as any)?.taxable_value ?? 0),
+    cgst: Number((b2c as any)?.cgst ?? 0),
+    sgst: Number((b2c as any)?.sgst ?? 0),
+    total: Number((b2c as any)?.total ?? 0),
+  };
+
+  return { csv, b2bCount: b2bRows.length, b2cSummary };
+}
+
+/**
+ * GSTR-3B: Summary return
+ */
+export async function getGstr3bExport(tenantId: string, opts?: { from?: string; to?: string }) {
+  const df = dateFilter(opts?.from, opts?.to);
+
+  const [outward] = await db.execute(sql.raw(`
+    SELECT COALESCE(SUM(subtotal_taxable::numeric), 0) as taxable_value,
+      COALESCE(SUM(total_cgst::numeric), 0) as cgst,
+      COALESCE(SUM(total_sgst::numeric), 0) as sgst,
+      COALESCE(SUM(total_igst::numeric), 0) as igst
+    FROM sales s WHERE s.tenant_id = '${tenantId}' AND s.status = 'completed' AND s.gst_scheme = 'regular' ${df}
+  `));
+
+  // Input tax (from purchases under regular scheme)
+  const [input] = await db.execute(sql.raw(`
+    SELECT COALESCE(SUM(total_gst::numeric), 0) as input_tax
+    FROM goods_receipts WHERE tenant_id = '${tenantId}'
+      ${opts?.from ? `AND created_at >= '${opts.from}'::timestamptz` : ''}
+      ${opts?.to ? `AND created_at <= '${opts.to}'::timestamptz` : ''}
+  `));
+
+  const outwardTax = Number((outward as any)?.cgst ?? 0) + Number((outward as any)?.sgst ?? 0) + Number((outward as any)?.igst ?? 0);
+  const inputTax = Number((input as any)?.input_tax ?? 0);
+
+  const headers = ['Description', 'Taxable Value', 'CGST', 'SGST', 'IGST', 'Total Tax'];
+  const rows = [
+    ['Outward Supplies', String(Number((outward as any)?.taxable_value ?? 0)), String(Number((outward as any)?.cgst ?? 0)), String(Number((outward as any)?.sgst ?? 0)), String(Number((outward as any)?.igst ?? 0)), String(outwardTax)],
+    ['Input Tax Credit', '', '', '', '', String(inputTax)],
+    ['Net Tax Payable', '', '', '', '', String(outwardTax - inputTax)],
+  ];
+
+  return {
+    csv: toCsvString(headers, rows),
+    summary: {
+      outwardTaxableValue: Number((outward as any)?.taxable_value ?? 0),
+      outwardTax,
+      inputTax,
+      netTaxPayable: outwardTax - inputTax,
+    },
+  };
+}
+
+/**
+ * CMP-08: Composite scheme quarterly statement
+ */
+export async function getCmp08Export(tenantId: string, opts?: { from?: string; to?: string }) {
+  const df = dateFilter(opts?.from, opts?.to);
+
+  const [result] = await db.execute(sql.raw(`
+    SELECT COALESCE(SUM(net_payable::numeric), 0) as turnover
+    FROM sales s WHERE s.tenant_id = '${tenantId}' AND s.status = 'completed' ${df}
+  `));
+
+  const turnover = Number((result as any)?.turnover ?? 0);
+  const taxRate = 1; // 1% for traders under Composite
+  const taxPayable = Math.round(turnover * taxRate) / 100;
+  const cgst = Math.round(taxPayable * 50) / 100; // 0.5% CGST
+  const sgst = Math.round(taxPayable * 50) / 100; // 0.5% SGST
+
+  const headers = ['Description', 'Amount'];
+  const rows = [
+    ['Total Turnover', String(turnover)],
+    ['Tax Rate', `${taxRate}%`],
+    ['CGST (0.5%)', String(cgst)],
+    ['SGST (0.5%)', String(sgst)],
+    ['Total Tax Payable', String(taxPayable)],
+  ];
+
+  return {
+    csv: toCsvString(headers, rows),
+    summary: { turnover, taxRate, cgst, sgst, taxPayable },
+  };
+}
