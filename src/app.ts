@@ -43,9 +43,10 @@ app.get('/health', async (c) => {
 
 // 6. Swagger UI — available in development
 if (env.NODE_ENV !== 'production') {
-  app.doc('/api/openapi.json', {
-    openapi: '3.1.0',
-    info: { title: 'InvenTrack API', version: '1.0.0' },
+  // Serve auto-generated spec (for any future OpenAPI routes) merged with manual paths
+  app.get('/api/openapi.json', async (c) => {
+    const { generateOpenApiSpec } = await import('./lib/openapi-spec.js');
+    return c.json(generateOpenApiSpec());
   });
   app.get('/docs', swaggerUI({ url: '/api/openapi.json' }));
 }
