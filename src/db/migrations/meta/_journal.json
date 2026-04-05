@@ -8,6 +8,13 @@
       "when": 1775403830026,
       "tag": "0000_fantastic_alice",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1775407366102,
+      "tag": "0001_heavy_black_queen",
+      "breakpoints": true
     }
   ]
 }
