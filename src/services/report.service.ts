@@ -5,6 +5,7 @@ import { productVariants, products, inventoryMovements } from '../db/schema/prod
 import { customers } from '../db/schema/customers.js';
 import { suppliers } from '../db/schema/suppliers.js';
 import { syncConflicts } from '../db/schema/sync.js';
+import { goodsReceipts } from '../db/schema/purchases.js';
 import { tenantSettings } from '../db/schema/tenants.js';
 
 function todayStart(): string {
@@ -339,4 +340,66 @@ export async function getLowStockReport(tenantId: string) {
     .orderBy(asc(productVariants.availableQuantity));
 
   return { data, count: data.length };
+}
+
+// ──────────────── Purchase Reports (M15) ────────────────
+
+export async function getSupplierPurchases(
+  tenantId: string,
+  opts?: { from?: string; to?: string },
+) {
+  const conditions = [`gr.tenant_id = '${tenantId}'`];
+  if (opts?.from) conditions.push(`gr.created_at >= '${opts.from}'::timestamptz`);
+  if (opts?.to) conditions.push(`gr.created_at <= '${opts.to}'::timestamptz`);
+
+  const data = await db.execute(sql.raw(`
+    SELECT
+      s.id as supplier_id,
+      s.name as supplier_name,
+      COUNT(gr.id)::int as receipt_count,
+      COALESCE(SUM(gr.total_amount::numeric), 0) as total_purchases,
+      s.outstanding_balance::numeric as outstanding_balance
+    FROM suppliers s
+    LEFT JOIN goods_receipts gr ON gr.supplier_id = s.id AND ${conditions.join(' AND ')}
+    WHERE s.tenant_id = '${tenantId}' AND s.deleted_at IS NULL
+    GROUP BY s.id, s.name, s.outstanding_balance
+    ORDER BY total_purchases DESC
+  `));
+
+  return {
+    data: (data as any[]).map((r: any) => ({
+      supplierId: r.supplier_id,
+      supplierName: r.supplier_name,
+      receiptCount: Number(r.receipt_count),
+      totalPurchases: Number(r.total_purchases),
+      outstandingBalance: Number(r.outstanding_balance),
+    })),
+  };
+}
+
+export async function getPurchaseSummary(
+  tenantId: string,
+  opts?: { from?: string; to?: string },
+) {
+  const conditions = [`tenant_id = '${tenantId}'`];
+  if (opts?.from) conditions.push(`created_at >= '${opts.from}'::timestamptz`);
+  if (opts?.to) conditions.push(`created_at <= '${opts.to}'::timestamptz`);
+
+  const [summary] = await db.execute(sql.raw(`
+    SELECT
+      COUNT(*)::int as total_receipts,
+      COALESCE(SUM(total_amount::numeric), 0) as total_amount,
+      COALESCE(SUM(total_gst::numeric), 0) as total_gst,
+      COALESCE(SUM(amount_paid::numeric), 0) as total_paid
+    FROM goods_receipts
+    WHERE ${conditions.join(' AND ')}
+  `));
+
+  return {
+    totalReceipts: Number((summary as any)?.total_receipts ?? 0),
+    totalAmount: Number((summary as any)?.total_amount ?? 0),
+    totalGst: Number((summary as any)?.total_gst ?? 0),
+    totalPaid: Number((summary as any)?.total_paid ?? 0),
+    totalCredit: Number((summary as any)?.total_amount ?? 0) - Number((summary as any)?.total_paid ?? 0),
+  };
 }

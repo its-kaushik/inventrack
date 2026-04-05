@@ -58,9 +58,33 @@ reportRoutes.get('/low-stock', async (c) => {
   return c.json({ data: result });
 });
 
+// ── Purchase Reports (M15) ──
+
+// GET /reports/supplier-purchases
+reportRoutes.get('/supplier-purchases', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const query = c.req.query();
+  const result = await reportService.getSupplierPurchases(auth.tenantId, {
+    from: query.from, to: query.to,
+  });
+  return c.json({ data: result });
+});
+
+// GET /reports/purchase-summary
+reportRoutes.get('/purchase-summary', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.tenantId) throw new AppError('FORBIDDEN', 'No tenant context', 403);
+  const query = c.req.query();
+  const result = await reportService.getPurchaseSummary(auth.tenantId, {
+    from: query.from, to: query.to,
+  });
+  return c.json({ data: result });
+});
+
 // Remaining Phase 3 report endpoints to be added:
 // GET /reports/sales-summary, sales-by-category, sales-by-product, sales-by-brand, sales-trend
 // GET /reports/profit-margins, pnl, discount-impact
-// GET /reports/supplier-purchases, purchase-summary, purchase-vs-sales, stock-movement
+// GET /reports/purchase-vs-sales, stock-movement
 // GET /reports/customer-outstanding, supplier-outstanding, credit-aging, payment-collections
 // GET /reports/staff-activity, gst-summary, hsn-summary, expense-summary
