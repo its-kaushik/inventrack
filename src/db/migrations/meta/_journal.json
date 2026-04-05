@@ -36,6 +36,13 @@
       "when": 1775410388282,
       "tag": "0004_curly_azazel",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1775410843659,
+      "tag": "0005_faithful_green_goblin",
+      "breakpoints": true
     }
   ]
 }

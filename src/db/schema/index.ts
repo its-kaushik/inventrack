@@ -5,3 +5,4 @@ export * from './hsn-codes.js';
 export * from './products.js';
 export * from './suppliers.js';
 export * from './purchases.js';
+export * from './customers.js';
