@@ -8,3 +8,5 @@ export * from './purchases.js';
 export * from './customers.js';
 export * from './sales.js';
 export * from './sync.js';
+export * from './expenses.js';
+export * from './cash-register.js';
