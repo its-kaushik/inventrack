@@ -16,6 +16,55 @@ import { users } from './users.js';
 import { suppliers } from './suppliers.js';
 import { productVariants } from './products.js';
 
+// ── Purchase Orders ──
+
+export const poStatusEnum = pgEnum('po_status', [
+  'draft',
+  'sent',
+  'partially_received',
+  'fully_received',
+  'cancelled',
+]);
+
+export const purchaseOrders = pgTable(
+  'purchase_orders',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id),
+    poNumber: varchar('po_number', { length: 50 }).notNull(),
+    supplierId: uuid('supplier_id')
+      .notNull()
+      .references(() => suppliers.id),
+    status: poStatusEnum('status').notNull().default('draft'),
+    expectedDate: date('expected_date'),
+    totalAmount: numeric('total_amount', { precision: 12, scale: 2 }).notNull().default('0'),
+    notes: text('notes'),
+    createdBy: uuid('created_by').references(() => users.id),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('idx_po_tenant_number').on(table.tenantId, table.poNumber),
+    index('idx_po_tenant_supplier').on(table.tenantId, table.supplierId),
+    index('idx_po_tenant_status').on(table.tenantId, table.status),
+  ],
+);
+
+export const purchaseOrderItems = pgTable('purchase_order_items', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  purchaseOrderId: uuid('purchase_order_id')
+    .notNull()
+    .references(() => purchaseOrders.id, { onDelete: 'cascade' }),
+  variantId: uuid('variant_id')
+    .notNull()
+    .references(() => productVariants.id),
+  orderedQuantity: integer('ordered_quantity').notNull(),
+  receivedQuantity: integer('received_quantity').notNull().default(0),
+  expectedCostPrice: numeric('expected_cost_price', { precision: 12, scale: 2 }).notNull(),
+});
+
 // ── Goods Receipts ──
 
 export const receiptPaymentModeEnum = pgEnum('receipt_payment_mode', ['paid', 'credit', 'partial']);

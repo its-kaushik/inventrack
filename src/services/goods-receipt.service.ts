@@ -35,6 +35,7 @@ export async function createGoodsReceipt(
   userId: string,
   data: {
     supplierId: string;
+    purchaseOrderId?: string;
     supplierInvoiceNo?: string;
     supplierInvoiceDate?: string;
     supplierInvoiceUrl?: string;
@@ -78,6 +79,7 @@ export async function createGoodsReceipt(
         tenantId,
         receiptNumber,
         supplierId: data.supplierId,
+        purchaseOrderId: data.purchaseOrderId ?? null,
         supplierInvoiceNo: data.supplierInvoiceNo ?? null,
         supplierInvoiceDate: data.supplierInvoiceDate ?? null,
         supplierInvoiceUrl: data.supplierInvoiceUrl ?? null,
@@ -208,7 +210,16 @@ export async function createGoodsReceipt(
       });
     }
 
-    // 6. Audit log
+    // 6. Update PO if linked
+    if (data.purchaseOrderId) {
+      const { updatePOFromReceipt } = await import('./purchase-order.service.js');
+      await updatePOFromReceipt(tx as any, data.purchaseOrderId, processedItems.map((i) => ({
+        variantId: i.variantId,
+        quantity: i.quantity,
+      })));
+    }
+
+    // 7. Audit log
     await auditRepo.withTransaction(tx).log({
       tenantId,
       userId,

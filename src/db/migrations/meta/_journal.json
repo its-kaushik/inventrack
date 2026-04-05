@@ -64,6 +64,13 @@
       "when": 1775413293472,
       "tag": "0008_absurd_black_cat",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1775414392414,
+      "tag": "0009_public_switch",
+      "breakpoints": true
     }
   ]
 }

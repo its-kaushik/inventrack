@@ -3,6 +3,7 @@ import { moneySchema } from './common.validators.js';
 
 export const createGoodsReceiptSchema = z.object({
   supplierId: z.string().uuid(),
+  purchaseOrderId: z.string().uuid().optional(),
   supplierInvoiceNo: z.string().max(100).optional(),
   supplierInvoiceDate: z.string().optional(), // ISO date string
   supplierInvoiceUrl: z.string().url().optional(),
