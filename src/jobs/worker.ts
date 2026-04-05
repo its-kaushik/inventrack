@@ -14,7 +14,23 @@ export async function startWorker(): Promise<PgBoss> {
 
   await boss.start();
 
-  // Register job handlers
+  // pg-boss v12+ requires queues to be created before workers can listen.
+  // createQueue is idempotent — safe to call on every startup.
+  const allQueues = [
+    'resize-product-image',
+    'check-low-stock',
+    'check-shelf-aging',
+    'generate-daily-summary',
+    'check-credit-overdue',
+    'clean-parked-bills',
+    'clean-expired-tokens',
+    'clean-old-notifications',
+  ];
+  for (const name of allQueues) {
+    await boss.createQueue(name);
+  }
+
+  // Register event-triggered job handlers
   const { handleResizeProductImage } = await import('./resize-product-image.js');
   await boss.work('resize-product-image', async ([job]) => {
     await handleResizeProductImage(job.data as any);
@@ -34,12 +50,12 @@ export async function startWorker(): Promise<PgBoss> {
   const { handleCleanOldNotifications } = await import('./clean-old-notifications.js');
 
   // Schedule cron jobs
-  await boss.schedule('check-shelf-aging', '0 0 * * *', {}, { singletonKey: 'check-shelf-aging' }); // midnight daily
-  await boss.schedule('generate-daily-summary', '0 21 * * *', {}, { singletonKey: 'generate-daily-summary' }); // 9 PM daily
-  await boss.schedule('check-credit-overdue', '0 8 * * *', {}, { singletonKey: 'check-credit-overdue' }); // 8 AM daily
-  await boss.schedule('clean-parked-bills', '0 * * * *', {}, { singletonKey: 'clean-parked-bills' }); // hourly
-  await boss.schedule('clean-expired-tokens', '0 3 * * *', {}, { singletonKey: 'clean-expired-tokens' }); // 3 AM daily
-  await boss.schedule('clean-old-notifications', '0 4 * * 0', {}, { singletonKey: 'clean-old-notifications' }); // 4 AM Sunday
+  await boss.schedule('check-shelf-aging', '0 0 * * *', {}, { singletonKey: 'check-shelf-aging' });
+  await boss.schedule('generate-daily-summary', '0 21 * * *', {}, { singletonKey: 'generate-daily-summary' });
+  await boss.schedule('check-credit-overdue', '0 8 * * *', {}, { singletonKey: 'check-credit-overdue' });
+  await boss.schedule('clean-parked-bills', '0 * * * *', {}, { singletonKey: 'clean-parked-bills' });
+  await boss.schedule('clean-expired-tokens', '0 3 * * *', {}, { singletonKey: 'clean-expired-tokens' });
+  await boss.schedule('clean-old-notifications', '0 4 * * 0', {}, { singletonKey: 'clean-old-notifications' });
 
   // Register cron job workers
   await boss.work('check-shelf-aging', async () => { await handleCheckShelfAging(); });
@@ -49,7 +65,7 @@ export async function startWorker(): Promise<PgBoss> {
   await boss.work('clean-expired-tokens', async () => { await handleCleanExpiredTokens(); });
   await boss.work('clean-old-notifications', async () => { await handleCleanOldNotifications(); });
 
-  console.info('[pg-boss] Worker started with 8 job handlers + 6 cron schedules');
+  console.info('[pg-boss] Worker started with 8 queues, 8 job handlers, 6 cron schedules');
   return boss;
 }
 
@@ -70,6 +86,8 @@ export async function enqueueJob<T extends object>(
     console.warn('[pg-boss] Worker not started, cannot enqueue job:', name);
     return null;
   }
+  // Ensure queue exists (idempotent) before sending
+  await boss.createQueue(name);
   return boss.send(name, data, options ?? {});
 }
 
