@@ -16,13 +16,13 @@ const envSchema = z.object({
   JWT_ACCESS_EXPIRY: z.string().default('15m'),
   JWT_REFRESH_EXPIRY: z.string().default('30d'),
 
-  // S3 / Cloudflare R2
-  S3_BUCKET: z.string(),
+  // S3 / Cloudflare R2 (optional — image upload disabled if not configured)
+  S3_BUCKET: z.string().optional().default(''),
   S3_REGION: z.string().default('auto'),
-  S3_ACCESS_KEY: z.string(),
-  S3_SECRET_KEY: z.string(),
-  S3_ENDPOINT: z.string().url(),
-  S3_PUBLIC_URL: z.string().url(),
+  S3_ACCESS_KEY: z.string().optional().default(''),
+  S3_SECRET_KEY: z.string().optional().default(''),
+  S3_ENDPOINT: z.string().optional().default(''),
+  S3_PUBLIC_URL: z.string().optional().default(''),
 
   // CORS
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
