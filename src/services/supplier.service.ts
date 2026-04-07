@@ -13,13 +13,13 @@ export async function createSupplier(
   userId: string,
   data: {
     name: string;
-    contactPerson?: string;
-    phone?: string;
-    email?: string;
-    address?: string;
-    gstin?: string;
-    pan?: string;
-    bankDetails?: Record<string, unknown>;
+    contactPerson?: string | null;
+    phone?: string | null;
+    email?: string | null;
+    address?: string | null;
+    gstin?: string | null;
+    pan?: string | null;
+    bankDetails?: Record<string, unknown> | null;
     paymentTerms?: string;
   },
 ) {

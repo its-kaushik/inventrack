@@ -2,20 +2,23 @@ import { z } from 'zod';
 
 export const createTenantSchema = z.object({
   name: z.string().min(1, 'Name is required').max(255),
-  address: z.string().optional(),
-  phone: z.string().max(15).optional(),
-  email: z.string().email().optional(),
-  gstin: z.string().max(15).optional(),
+  ownerName: z.string().min(1, 'Owner name is required'),
+  ownerEmail: z.string().email('Invalid owner email'),
+  ownerPhone: z.string().min(10).max(15),
+  address: z.string().nullable().optional(),
+  phone: z.string().max(15).nullable().optional(),
+  email: z.string().email().nullable().optional(),
+  gstin: z.string().max(15).nullable().optional(),
   gstScheme: z.enum(['composite', 'regular']).default('composite'),
 });
 
 export const updateTenantSchema = z.object({
   name: z.string().min(1).max(255).optional(),
-  address: z.string().optional(),
-  phone: z.string().max(15).optional(),
-  email: z.string().email().optional(),
-  gstin: z.string().max(15).optional(),
-  logoUrl: z.string().url().optional(),
+  address: z.string().nullable().optional(),
+  phone: z.string().max(15).nullable().optional(),
+  email: z.string().email().nullable().optional(),
+  gstin: z.string().max(15).nullable().optional(),
+  logoUrl: z.string().url().nullable().optional(),
 });
 
 export const updateSettingsSchema = z.object({

@@ -14,10 +14,10 @@ export async function createCustomer(
   data: {
     name: string;
     phone: string;
-    email?: string;
-    address?: string;
-    notes?: string;
-    gstin?: string;
+    email?: string | null;
+    address?: string | null;
+    notes?: string | null;
+    gstin?: string | null;
     clientId?: string;
   },
 ) {

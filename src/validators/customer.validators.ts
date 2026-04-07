@@ -4,10 +4,10 @@ import { phoneSchema, moneySchema } from './common.validators.js';
 export const createCustomerSchema = z.object({
   name: z.string().min(1, 'Name is required').max(255),
   phone: phoneSchema,
-  email: z.string().email().optional(),
-  address: z.string().optional(),
-  notes: z.string().optional(),
-  gstin: z.string().max(15).optional(),
+  email: z.string().email().nullable().optional(),
+  address: z.string().nullable().optional(),
+  notes: z.string().nullable().optional(),
+  gstin: z.string().max(15).nullable().optional(),
   clientId: z.string().uuid().optional(), // For offline sync idempotency
 });
 

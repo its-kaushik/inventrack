@@ -3,17 +3,17 @@ import { moneySchema } from './common.validators.js';
 
 export const createSupplierSchema = z.object({
   name: z.string().min(1, 'Name is required').max(255),
-  contactPerson: z.string().max(255).optional(),
-  phone: z.string().max(15).optional(),
-  email: z.string().email().optional(),
-  address: z.string().optional(),
-  gstin: z.string().max(15).optional(),
-  pan: z.string().max(10).optional(),
+  contactPerson: z.string().max(255).nullable().optional(),
+  phone: z.string().max(15).nullable().optional(),
+  email: z.string().email().nullable().optional(),
+  address: z.string().nullable().optional(),
+  gstin: z.string().max(15).nullable().optional(),
+  pan: z.string().max(10).nullable().optional(),
   bankDetails: z.object({
     accountNo: z.string().optional(),
     ifsc: z.string().optional(),
     bankName: z.string().optional(),
-  }).optional(),
+  }).nullable().optional(),
   paymentTerms: z.enum(['cod', 'net_15', 'net_30', 'net_60', 'advance']).default('cod'),
 });
 
