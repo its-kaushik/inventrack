@@ -155,28 +155,45 @@ export async function getDashboard(tenantId: string) {
       AND status = 'unresolved'
   `);
 
+  // Calculate MTD change percent
+  const mtdCurrent = Number((mtdSales as any).total_revenue ?? 0);
+  const mtdLast = Number((lastMonthSales as any).total_revenue ?? 0);
+  const changePercent = mtdLast > 0 ? ((mtdCurrent - mtdLast) / mtdLast) * 100 : 0;
+
   return {
+    // Today's sales
     todaySales: {
-      transactionCount: Number((todaySales as any).transaction_count ?? 0),
-      totalRevenue: Number((todaySales as any).total_revenue ?? 0),
-      avgValue: Number((todaySales as any).avg_value ?? 0),
+      total: String(Number((todaySales as any).total_revenue ?? 0).toFixed(2)),
+      count: Number((todaySales as any).transaction_count ?? 0),
+      avgTransaction: String(Number((todaySales as any).avg_value ?? 0).toFixed(2)),
     },
-    mtdRevenue: Number((mtdSales as any).total_revenue ?? 0),
-    lastMonthRevenue: Number((lastMonthSales as any).total_revenue ?? 0),
+    // Month-to-date comparison
+    mtd: {
+      currentMonth: String(mtdCurrent.toFixed(2)),
+      lastMonth: String(mtdLast.toFixed(2)),
+      changePercent: Math.round(changePercent * 100) / 100,
+    },
+    // Inventory alerts
     lowStockCount: Number((lowStock as any).count ?? 0),
-    agingAlertsCount: (agingCount as any)?.count ? Number((agingCount as any).count) : 0,
-    credit: {
-      totalReceivable: Number((receivable as any).total ?? 0),
-      totalPayable: Number((payable as any).total ?? 0),
-    },
-    topSellingToday: (topSelling as any[]).map((r: any) => ({
+    agingStockCount: (agingCount as any)?.count ? Number((agingCount as any).count) : 0,
+    negativeStockCount: 0, // TODO: implement negative stock query
+    // Credit summary
+    totalReceivable: String(Number((receivable as any).total ?? 0).toFixed(2)),
+    totalPayable: String(Number((payable as any).total ?? 0).toFixed(2)),
+    overdueReceivableCount: 0, // TODO: implement overdue count query
+    overduePayableCount: 0, // TODO: implement overdue count query
+    // Top selling products today
+    topSelling: (topSelling as any[]).map((r: any) => ({
       productName: r.product_name,
-      totalQty: Number(r.total_qty),
-      totalRevenue: Number(r.total_revenue),
+      variantDescription: null,
+      quantitySold: Number(r.total_qty),
+      revenue: String(Number(r.total_revenue).toFixed(2)),
     })),
-    syncStatus: {
-      unresolvedConflicts: Number((conflictCount as any).count ?? 0),
-    },
+    // Sync status
+    pendingBillCount: 0, // Pending bills are client-side only
+    unresolvedConflictCount: Number((conflictCount as any).count ?? 0),
+    // Recent stock added (empty for now — salesman dashboard)
+    recentStockAdded: [],
   };
 }
 
